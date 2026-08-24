@@ -83,7 +83,8 @@ const styles: Record<string, React.CSSProperties> = {
     padding: '5px 8px',
     color: 'inherit',
     font: 'inherit',
-    maxWidth: 320
+    maxWidth: 320,
+    textAlign: 'left'
   },
   button: {
     border: '1px solid var(--dsh-border, rgba(128,128,128,0.3))',
