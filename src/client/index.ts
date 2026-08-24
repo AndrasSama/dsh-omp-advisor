@@ -7,11 +7,16 @@ import { createSettingsSection } from './SettingsSection'
 
 export const name = 'dsh-omp-advisor'
 
-export const inject = [
-  '@deepseek-ai/dsh-client-runtime',
-  '@deepseek-ai/dsh-client-connection',
-  '@deepseek-ai/dsh-client-ui-settings'
-]
+/**
+ * Cordis SERVICE names this module consumes (NOT package names — those belong
+ * in package.json `dsh.client.inject`, the module-graph layer). The browser
+ * fiber waits until each name is provided in the client root context:
+ *   slots         ← dsh-client-runtime (SlotRegistry)
+ *   connection    ← dsh-client-connection
+ *   settingsScope ← dsh-client-ui-settings
+ * Exporting package names here strands the fiber pending forever.
+ */
+export const inject = ['slots', 'connection', 'settingsScope']
 
 export function apply(ctx: any): void {
   ctx.effect(

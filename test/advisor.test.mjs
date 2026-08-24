@@ -475,3 +475,63 @@ test('rpc registration is a no-op without a connection service', () => {
   const dispose = registerAdvisorRpc({}, stubService())
   assert.equal(typeof dispose, 'function')
 })
+
+/* ------------------------- client bundle contract ------------------------- */
+/*
+ * Two-layer inject discipline (learned from a real boot failure):
+ *  - package.json `dsh.client.inject` = module-graph deps → PACKAGE names.
+ *  - the client module's exported `inject` = cordis service deps → SERVICE
+ *    names (slots/connection/settingsScope). Exporting package names there
+ *    strands the browser fiber pending forever, because no service is ever
+ *    provided under a package name.
+ */
+
+test('client bundle exports service-name injects, not package names', async () => {
+  const { readFileSync } = await import('node:fs')
+  const { join, dirname } = await import('node:path')
+  const { fileURLToPath } = await import('node:url')
+  const root = join(dirname(fileURLToPath(import.meta.url)), '..')
+
+  const registrations = []
+  globalThis.window = {
+    __ModuleLoader__: { load: (registration) => registrations.push(registration) }
+  }
+  try {
+    const code = readFileSync(join(root, 'lib/client.js'), 'utf8')
+    // eslint-disable-next-line no-new-func
+    new Function(code)()
+  } finally {
+    delete globalThis.window
+  }
+
+  assert.equal(registrations.length, 1)
+  assert.equal(registrations[0].id, 'dsh-omp-advisor')
+  const reactStub = { createElement: () => null }
+  const exports = registrations[0].factory((spec) => {
+    if (spec === 'react' || spec === 'react/jsx-runtime') return reactStub
+    throw new Error(`unexpected external require in client bundle: ${spec}`)
+  })
+  assert.equal(exports.name, 'dsh-omp-advisor')
+  assert.equal(typeof exports.apply, 'function')
+  assert.ok(Array.isArray(exports.inject), 'inject export must be an array')
+  for (const name of exports.inject) {
+    assert.ok(
+      !name.startsWith('@deepseek-ai/'),
+      `module inject entry "${name}" is a package name — cordis waits for SERVICE names (slots/connection/settingsScope); package names belong in package.json dsh.client.inject`
+    )
+  }
+  assert.deepEqual([...exports.inject].sort(), ['connection', 'settingsScope', 'slots'])
+})
+
+test('package.json dsh.client.inject keeps the module-graph package names', async () => {
+  const { readFileSync } = await import('node:fs')
+  const { join, dirname } = await import('node:path')
+  const { fileURLToPath } = await import('node:url')
+  const root = join(dirname(fileURLToPath(import.meta.url)), '..')
+  const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'))
+  assert.deepEqual(pkg.dsh.client.inject, [
+    '@deepseek-ai/dsh-client-runtime',
+    '@deepseek-ai/dsh-client-connection',
+    '@deepseek-ai/dsh-client-ui-settings'
+  ])
+})
