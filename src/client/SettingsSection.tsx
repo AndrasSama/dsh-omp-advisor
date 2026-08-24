@@ -83,8 +83,7 @@ const styles: Record<string, React.CSSProperties> = {
     padding: '5px 8px',
     color: 'inherit',
     font: 'inherit',
-    maxWidth: 320,
-    textAlign: 'center'
+    maxWidth: 320
   },
   button: {
     border: '1px solid var(--dsh-border, rgba(128,128,128,0.3))',
@@ -140,10 +139,17 @@ const STATUS_COLORS: Record<string, string> = {
 export function createSettingsSection(ctx: ClientCtx): React.ComponentType<{ close?: () => void }> {
   return function OmpAdvisorSettingsSection() {
     // Server truth (snapshot poll + settled writes) and an optimistic draft
-    // laid over it while writes are crossing the wire. Rendering reads the
-    // draft first, so every control reflects a change the instant it happens
-    // instead of after the RPC round-trip — and fast typing cannot lose
-    // characters to an in-flight response clobbering the input.
+    // laid over it while the user is editing. Rendering reads the draft
+    // first, so every control reflects a change the instant it happens.
+    //
+    // The host normalizes settings on write (trims names/instructions, drops
+    // entries without a name yet), so folding a response back mid-typing
+    // would yank characters out of focused inputs. Therefore:
+    //  - text edits debounce their host write (coalesced per pause),
+    //  - the draft stays up until the write queue drains AND a short grace
+    //    period passes with no new edit, and only then folds settled state,
+    //  - the 5s poll refreshes live session status but never touches the
+    //    settings section while a draft is up.
     const [view, setView] = useState<SnapshotView | null>(null)
     const [draft, setDraft] = useState<SettingsView | null>(null)
     const [phase, setPhase] = useState<'loading' | 'ready' | 'error'>('loading')
@@ -153,11 +159,22 @@ export function createSettingsSection(ctx: ClientCtx): React.ComponentType<{ clo
 
     const viewRef = useRef<SnapshotView | null>(null)
     viewRef.current = view
-    // Serialized write queue: patches reach the host in edit order, and the
-    // draft only clears once the last queued write has settled.
+    const draftRef = useRef<SettingsView | null>(null)
+    draftRef.current = draft
+    // Serialized write queue: patches reach the host in edit order.
     const queueRef = useRef<Promise<unknown>>(Promise.resolve())
     const pendingRef = useRef(0)
     const settledSettingsRef = useRef<SettingsView | null>(null)
+    // Debounce (text edits) and grace (draft fold) timers.
+    const textTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+    const graceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+    useEffect(() => {
+      return () => {
+        if (textTimerRef.current !== null) clearTimeout(textTimerRef.current)
+        if (graceTimerRef.current !== null) clearTimeout(graceTimerRef.current)
+      }
+    }, [])
 
     useEffect(() => {
       let cancelled = false
@@ -183,8 +200,11 @@ export function createSettingsSection(ctx: ClientCtx): React.ComponentType<{ clo
             const value = unwrapRpcResult<SnapshotView>(result, 'advisor snapshot')
             if (cancelled) return
             setPhase('ready')
-            // Never clobber an in-flight optimistic edit with stale poll data.
-            if (pendingRef.current > 0) return
+            if (pendingRef.current > 0 || draftRef.current !== null) {
+              // Editing: keep the live status fresh, leave settings alone.
+              setView(current => (current ? { ...current, sessions: value.sessions } : value))
+              return
+            }
             settledSettingsRef.current = value.settings
             setView(value)
           })
@@ -201,15 +221,7 @@ export function createSettingsSection(ctx: ClientCtx): React.ComponentType<{ clo
       }
     }, [])
 
-    const write = useCallback((field: string, next: unknown) => {
-      setWriteError(null)
-      // 1. Optimistic apply — the UI reflects the edit this frame.
-      setDraft(current => {
-        const base = current ?? settledSettingsRef.current ?? viewRef.current?.settings
-        if (!base) return current
-        return { ...base, [field]: next }
-      })
-      // 2. Queue the host write so concurrent edits apply in order.
+    const enqueueWrite = useCallback((field: string, next: unknown) => {
       pendingRef.current += 1
       queueRef.current = queueRef.current
         .then(() => ctx.connection.rpc.call('/dsh-omp-advisor', 'update', { patch: { [field]: next } }))
@@ -223,12 +235,47 @@ export function createSettingsSection(ctx: ClientCtx): React.ComponentType<{ clo
         .finally(() => {
           pendingRef.current -= 1
           if (pendingRef.current !== 0) return
-          // Queue drained: server truth has caught up; drop the overlay.
-          const settled = settledSettingsRef.current
-          if (settled) setView(current => (current ? { ...current, settings: settled } : current))
-          setDraft(null)
+          // Queue drained: fold settled state after a grace period so a user
+          // who keeps typing is never interrupted by a normalization fold.
+          if (graceTimerRef.current !== null) clearTimeout(graceTimerRef.current)
+          graceTimerRef.current = setTimeout(() => {
+            graceTimerRef.current = null
+            if (pendingRef.current > 0) return
+            const settled = settledSettingsRef.current
+            if (settled) setView(current => (current ? { ...current, settings: settled } : current))
+            setDraft(null)
+          }, 1500)
         })
     }, [])
+
+    const write = useCallback(
+      (field: string, next: unknown, options?: { text?: boolean }) => {
+        setWriteError(null)
+        // Any edit cancels a pending normalization fold.
+        if (graceTimerRef.current !== null) {
+          clearTimeout(graceTimerRef.current)
+          graceTimerRef.current = null
+        }
+        // 1. Optimistic apply — the UI reflects the edit this frame.
+        setDraft(current => {
+          const base = current ?? settledSettingsRef.current ?? viewRef.current?.settings
+          if (!base) return current
+          return { ...base, [field]: next }
+        })
+        // 2. Host write: debounced for free-text fields (one write per typing
+        //    pause, carrying the latest value), immediate for discrete controls.
+        if (options?.text) {
+          if (textTimerRef.current !== null) clearTimeout(textTimerRef.current)
+          textTimerRef.current = setTimeout(() => {
+            textTimerRef.current = null
+            enqueueWrite(field, next)
+          }, 350)
+          return
+        }
+        enqueueWrite(field, next)
+      },
+      [enqueueWrite]
+    )
 
     const value = draft ?? view?.settings
     const advisors = useMemo<AdvisorEntryView[]>(() => value?.advisors ?? [], [value])
@@ -236,7 +283,9 @@ export function createSettingsSection(ctx: ClientCtx): React.ComponentType<{ clo
     const updateAdvisor = useCallback(
       (index: number, patch: Partial<AdvisorEntryView>) => {
         const next = advisors.map((entry, i) => (i === index ? { ...entry, ...patch } : entry))
-        write('advisors', next)
+        const keys = Object.keys(patch)
+        const textOnly = keys.every(key => key === 'name' || key === 'instructions')
+        write('advisors', next, textOnly ? { text: true } : undefined)
       },
       [advisors, write]
     )
@@ -353,7 +402,7 @@ export function createSettingsSection(ctx: ClientCtx): React.ComponentType<{ clo
             const efforts = model?.efforts ?? []
             return (
               <div
-                key={`${entry.name}-${index}`}
+                key={index}
                 style={{
                   border: '1px dashed var(--dsh-border, rgba(128,128,128,0.3))',
                   borderRadius: 8,
