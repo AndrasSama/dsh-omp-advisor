@@ -10,8 +10,7 @@ export const name = 'dsh-omp-advisor'
 export const inject = [
   '@deepseek-ai/dsh-client-runtime',
   '@deepseek-ai/dsh-client-connection',
-  '@deepseek-ai/dsh-client-ui-settings',
-  '@deepseek-ai/dsh-api-remotes'
+  '@deepseek-ai/dsh-client-ui-settings'
 ]
 
 export function apply(ctx: any): void {
