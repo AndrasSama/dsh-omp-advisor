@@ -7,7 +7,7 @@ import { Service } from '@deepseek-ai/cordis'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { registerAdvisorRpc } from './rpc'
 import { SessionAdvisorRuntime } from './runtime'
-import { SETTINGS_NAMESPACE, advisorSettingsSchema, normalizeSettings } from './settings'
+import { SETTINGS_NAMESPACE, advisorSettingsSchema, normalizeSettings, normalizeSettingsLenient } from './settings'
 import type { AdvisorSettings, CordisContextLike, SessionAdvisorSnapshot, SessionLike } from './types'
 
 export const SERVICE_NAME = 'dsh-omp-advisor'
@@ -88,21 +88,34 @@ export class AdvisorService extends Service {
   }
 
   /**
+   * Editor-facing view of the roster: NON-destructive (keeps entries whose
+   * name/provider/model is empty mid-edit, no trimming). The settings section
+   * folds this into the form, so it must never delete the card being edited.
+   * The runtime keeps reading the strict `settings` getter.
+   */
+  get settingsView(): AdvisorSettings {
+    return normalizeSettingsLenient(this.settingsScope.get())
+  }
+
+  /**
    * Merge a partial settings patch through the Host settings domain
    * (schema-resolved, validated, watchers notified — the same path the
    * settings document uses everywhere else) and answer the resolved value.
    * The settings section's write transport is the plugin's own RPC channel
    * because DSH keeps `settingsScope` persistence loopback-only; validation
    * failures surface as thrown errors the RPC layer folds into bad-request.
+   *
+   * Returns the NON-destructive editor view so clearing a name/description
+   * in the form does not delete the advisor; the runtime's strict value is
+   * refreshed separately so an incomplete advisor never runs.
    */
   updateSettings(patch: unknown): AdvisorSettings {
     if (typeof patch !== 'object' || patch === null || Array.isArray(patch)) {
       throw new Error('settings patch must be a plain object')
     }
     this.settingsScope.update(patch)
-    const resolved = normalizeSettings(this.settingsScope.get())
-    this.settingsValue = resolved
-    return resolved
+    this.settingsValue = normalizeSettings(this.settingsScope.get())
+    return normalizeSettingsLenient(this.settingsScope.get())
   }
 
   private attach(session: SessionLike): void {

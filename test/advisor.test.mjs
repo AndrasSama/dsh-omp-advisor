@@ -7,6 +7,7 @@ import {
   AdvisorOutputQuarantinedError,
   formatAdvisorBatchContent,
   normalizeSettings,
+  normalizeSettingsLenient,
   quarantineAdvisorUnsafeOutput,
   renderDelta,
   resolveDeliveryChannel,
@@ -283,6 +284,39 @@ test('normalizeSettings defaults on empty input', () => {
   assert.deepEqual(value.advisors, [])
 })
 
+test('normalizeSettingsLenient keeps mid-edit entries and does not trim', () => {
+  const value = normalizeSettingsLenient({
+    enabled: true,
+    advisors: [
+      { name: '', provider: 'p1', model: 'm1', maxTurns: 2, instructions: '' },
+      { name: ' trailing ', provider: 'p2', model: 'm2', maxTurns: 99, instructions: ' keep me ' },
+      { name: 'dup', provider: 'p3', model: 'm3' },
+      { name: 'dup', provider: 'p4', model: 'm4' }
+    ]
+  })
+  // Nothing is dropped: empty name, duplicate names, all preserved.
+  assert.equal(value.advisors.length, 4)
+  assert.equal(value.advisors[0].name, '')
+  assert.equal(value.advisors[0].instructions, '')
+  // No trimming: the editor must see exactly what was typed.
+  assert.equal(value.advisors[1].name, ' trailing ')
+  assert.equal(value.advisors[1].instructions, ' keep me ')
+  // Type coercion still applies.
+  assert.equal(value.advisors[1].maxTurns, 10)
+  assert.equal(value.advisors[2].maxTurns, 4)
+  assert.equal(value.advisors[3].enabled, true)
+})
+
+test('strict and lenient normalizers agree on a complete roster', () => {
+  const raw = {
+    enabled: true,
+    reviewTrigger: 'step',
+    interruptSeverities: ['blocker'],
+    advisors: [{ name: 'a', provider: 'p', model: 'm', maxTurns: 3, instructions: 'x', enabled: false }]
+  }
+  assert.deepEqual(normalizeSettingsLenient(raw), normalizeSettings(raw))
+})
+
 /* -------------------------------- advisor tools ------------------------------ */
 
 test('advisor tools confine paths to the workspace', async () => {
@@ -412,6 +446,7 @@ function stubService(overrides = {}) {
     snapshot: sessionId => ({ sessionId, active: false, advisors: [], recentNotes: [] }),
     activeSessions: () => ['s1'],
     settings: { enabled: false },
+    settingsView: { enabled: false, advisors: [{ name: '', provider: 'p', model: 'm', maxTurns: 4 }] },
     setPaused: () => true,
     reviewNow: () => true,
     updateSettings: patch => ({ enabled: true, ...patch }),
@@ -452,6 +487,10 @@ test('rpc snapshot returns an RpcResult value, not a raw object', async () => {
   assert.equal(all.ok, true)
   assert.equal(all.value.sessions.length, 1)
   assert.equal(all.value.sessions[0].sessionId, 's1')
+  // Settings come from the non-destructive editor view: an entry with an
+  // empty name (user mid-edit) must survive the poll, not be filtered away.
+  assert.equal(all.value.settings.advisors.length, 1)
+  assert.equal(all.value.settings.advisors[0].name, '')
   const one = await captured.handler('snapshot', { sessionId: 's9' }, signal)
   assert.equal(one.ok, true)
   assert.equal(one.value.sessionId, 's9')

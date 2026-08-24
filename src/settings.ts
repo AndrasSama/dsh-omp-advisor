@@ -5,7 +5,7 @@
  * `ctx.llm.stream` calls.
  */
 import z from '@deepseek-ai/schemastery'
-import type { AdvisorSettings } from './types'
+import type { AdvisorEntry, AdvisorSettings } from './types'
 
 export const SETTINGS_NAMESPACE = 'dsh-omp-advisor'
 
@@ -74,5 +74,46 @@ export function normalizeSettings(raw: unknown): AdvisorSettings {
     reviewTrigger: value.reviewTrigger === 'step' ? 'step' : 'turn',
     interruptSeverities: severities,
     advisors: deduped
+  }
+}
+
+/**
+ * Editor round-trip normalizer: type-coerces like `normalizeSettings` but is
+ * NON-destructive — it keeps entries whose name/provider/model is empty (the
+ * user may be mid-edit) and does not trim text. The settings section folds
+ * the host's reply into the form, so a strict reply would delete the card
+ * being edited and yank characters out of focused inputs. The runtime keeps
+ * reading through the strict `normalizeSettings`, so an incomplete advisor
+ * never actually runs.
+ */
+export function normalizeSettingsLenient(raw: unknown): AdvisorSettings {
+  const value = (raw ?? {}) as Partial<AdvisorSettings>
+  const advisors = Array.isArray(value.advisors) ? value.advisors : []
+  const preserved: AdvisorEntry[] = []
+  for (const entry of advisors) {
+    if (!entry || typeof entry !== 'object') continue
+    const e = entry as Partial<AdvisorEntry>
+    preserved.push({
+      name: typeof e.name === 'string' ? e.name : '',
+      provider: typeof e.provider === 'string' ? e.provider : '',
+      model: typeof e.model === 'string' ? e.model : '',
+      ...(typeof e.reasoningEffort === 'string' && e.reasoningEffort
+        ? { reasoningEffort: e.reasoningEffort }
+        : {}),
+      maxTurns: Math.min(10, Math.max(1, Math.round(e.maxTurns || 4))),
+      ...(typeof e.instructions === 'string' ? { instructions: e.instructions } : {}),
+      enabled: e.enabled !== false
+    })
+  }
+  const severities = Array.isArray(value.interruptSeverities)
+    ? value.interruptSeverities.filter((s): s is 'nit' | 'concern' | 'blocker' =>
+        s === 'nit' || s === 'concern' || s === 'blocker'
+      )
+    : (['concern', 'blocker'] as AdvisorSettings['interruptSeverities'])
+  return {
+    enabled: value.enabled === true,
+    reviewTrigger: value.reviewTrigger === 'step' ? 'step' : 'turn',
+    interruptSeverities: severities,
+    advisors: preserved
   }
 }

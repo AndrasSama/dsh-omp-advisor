@@ -70,7 +70,9 @@ export function registerAdvisorRpc(ctx: CordisContextLike, service: AdvisorServi
               ok: true,
               value: {
                 sessions: service.activeSessions().map(sessionId => service.snapshot(sessionId)),
-                settings: service.settings
+                // Editor view (non-destructive): the poll must not delete a
+                // card whose name/description the user has cleared mid-edit.
+                settings: service.settingsView
               }
             }
           }
