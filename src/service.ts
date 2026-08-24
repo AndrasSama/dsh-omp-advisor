@@ -25,7 +25,7 @@ function sessionCwd(session: SessionLike): string {
 }
 
 export class AdvisorService extends Service {
-  static inject = ['agents', 'llm', 'settings']
+  static inject = ['agents', 'llm', 'settings', 'connection']
 
   private runtimes = new Map<string, SessionAdvisorRuntime>()
   private settingsValue: AdvisorSettings

@@ -14,7 +14,7 @@ import { advisorSettingsSchema } from './settings'
 /** Stable Cordis plugin identity. */
 export const name = 'dsh-omp-advisor'
 
-export const inject = ['settings', 'agents', 'llm']
+export const inject = ['settings', 'agents', 'llm', 'connection']
 
 /** Composition config schema (base layer under the user settings document). */
 export const Config = advisorSettingsSchema
