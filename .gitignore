@@ -1,0 +1,4 @@
+node_modules/
+*.tsbuildinfo
+test/.bundle.mjs
+.DS_Store

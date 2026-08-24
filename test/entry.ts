@@ -1,0 +1,8 @@
+/** Test bundle entry: re-export the units under test (pure modules + loop). */
+export * from '../src/advise-tool'
+export * from '../src/delivery'
+export * from '../src/quarantine'
+export * from '../src/delta'
+export * from '../src/tools'
+export { normalizeSettings } from '../src/settings'
+export { AdvisorLoop } from '../src/advisor-loop'

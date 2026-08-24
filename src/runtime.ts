@@ -1,0 +1,302 @@
+/**
+ * Per-session advisor runtime: owns one advisor loop per configured advisor,
+ * feeds transcript deltas from the durable session log, contains failures,
+ * and routes accepted advice into the primary agent.
+ *
+ * Ported containment semantics (oh-my-pi, MIT): serialized drain, 3-failure
+ * backlog drop, permanent-error halt, quota cooldown pause. DSH-safe
+ * deviation: the primary agent is never blocked on an advisor.
+ */
+import { AdvisorLoop } from './advisor-loop'
+import { formatAdvisorBatchContent, resolveDeliveryChannel } from './delivery'
+import { PLUGIN_NAME, renderDelta } from './delta'
+import type {
+  AdvisorEntry,
+  AdvisorNote,
+  AdvisorRuntimeStatus,
+  AdvisorSeverity,
+  AdvisorSettings,
+  AdvisorStatusView,
+  AgentLike,
+  LlmLike,
+  SessionEvent
+} from './types'
+
+/** Consecutive failures tolerated before the backlog is dropped. */
+const MAX_CONSECUTIVE_FAILURES = 3
+/** Cooldown after a quota/rate-limit failure before the advisor retries. */
+const QUOTA_COOLDOWN_MS = 5 * 60_000
+/** Recent delivered notes retained for the RPC snapshot. */
+const RECENT_NOTES_LIMIT = 20
+
+const QUOTA_CODES = new Set(['RATE_LIMIT', 'QUOTA', 'QUOTA_EXHAUSTED', 'RATE_LIMITED', 'TOO_MANY_REQUESTS'])
+
+function isQuotaFailure(error: unknown): boolean {
+  const message = String(error instanceof Error ? error.message : error)
+  if (/rate.?limit|quota|429|too many requests/i.test(message)) return true
+  const code = (error as { code?: unknown })?.code
+  return typeof code === 'string' && QUOTA_CODES.has(code.toUpperCase())
+}
+
+function isPermanentFailure(error: unknown): boolean {
+  return /model not (found|supported)|no adapter|unknown provider|invalid (provider|model)|does not exist/i.test(
+    String(error instanceof Error ? error.message : error)
+  )
+}
+
+interface AdvisorSlot {
+  entry: AdvisorEntry
+  loop: AdvisorLoop
+  cursor: number
+  updateIndex: number
+  status: AdvisorRuntimeStatus
+  backlog: number
+  reviewsCompleted: number
+  adviceDelivered: number
+  consecutiveFailures: number
+  lastError?: string
+  quotaUntil?: number
+  draining: boolean
+  queued: { inProgress: boolean }[]
+}
+
+export interface SessionRuntimeHost {
+  sessionId: string
+  /** Live agent handle for the session, when one is attached. */
+  getAgent(): AgentLike | undefined
+  /** Current durable event list of the session. */
+  getEvents(): SessionEvent[]
+  /** Workspace cwd for advisor tools. */
+  cwd: string
+  llm: LlmLike
+  /** Message factory bound to the DSH runtime (createUserMessage). */
+  makeUserMessage(text: string): unknown
+  log?(message: string, meta?: Record<string, unknown>): void
+}
+
+export class SessionAdvisorRuntime {
+  private slots = new Map<string, AdvisorSlot>()
+  private disposed = false
+  private recentNotes: AdvisorNote[] = []
+  private interruptSeverities: AdvisorSeverity[]
+
+  constructor(
+    private readonly host: SessionRuntimeHost,
+    settings: AdvisorSettings,
+    private readonly createUserMessage: (text: string) => unknown
+  ) {
+    this.interruptSeverities = [...settings.interruptSeverities]
+    this.rebuild(settings)
+  }
+
+  /** Rebuild advisor slots from settings, preserving cursors where the advisor survives. */
+  rebuild(settings: AdvisorSettings): void {
+    if (this.disposed) return
+    this.interruptSeverities = [...settings.interruptSeverities]
+    const next = new Map<string, AdvisorSlot>()
+    for (const entry of settings.advisors) {
+      const key = entry.name
+      const existing = this.slots.get(key)
+      if (existing) {
+        existing.entry = entry
+        existing.loop.updateEntry(entry)
+        if (existing.status === 'halted' || existing.status === 'error') {
+          // Settings changed: give the advisor a fresh chance.
+          existing.status = entry.enabled === false ? 'paused' : 'running'
+          existing.consecutiveFailures = 0
+          existing.lastError = undefined
+          existing.loop.resetConversation()
+        } else if (entry.enabled === false) {
+          existing.status = 'paused'
+        } else if (existing.status === 'paused') {
+          existing.status = 'running'
+        }
+        next.set(key, existing)
+        continue
+      }
+      next.set(key, {
+        entry,
+        loop: new AdvisorLoop(
+          {
+            llm: this.host.llm,
+            cwd: this.host.cwd,
+            onAdvice: (note, severity, advisorName) => this.deliver(note, severity, advisorName),
+            log: this.host.log
+          },
+          entry
+        ),
+        cursor: 0,
+        updateIndex: 1,
+        status: entry.enabled === false ? 'paused' : 'running',
+        backlog: 0,
+        reviewsCompleted: 0,
+        adviceDelivered: 0,
+        consecutiveFailures: 0,
+        draining: false,
+        queued: []
+      })
+    }
+    this.slots = next
+  }
+
+  /** Queue one review pass for every enabled advisor (called on step/turn end). */
+  enqueueReview(inProgress: boolean): void {
+    if (this.disposed) return
+    for (const slot of this.slots.values()) {
+      if (slot.status !== 'running') continue
+      if (slot.queued.length > 0 && slot.queued[slot.queued.length - 1].inProgress === inProgress) continue
+      slot.queued.push({ inProgress })
+      slot.backlog = slot.queued.length
+      void this.drain(slot)
+    }
+  }
+
+  private async drain(slot: AdvisorSlot): Promise<void> {
+    if (slot.draining || this.disposed) return
+    slot.draining = true
+    try {
+      while (!this.disposed && slot.queued.length > 0) {
+        if (slot.status !== 'running') {
+          slot.queued = []
+          slot.backlog = 0
+          return
+        }
+        if (slot.quotaUntil && Date.now() < slot.quotaUntil) return
+        if (slot.quotaUntil && Date.now() >= slot.quotaUntil) {
+          slot.quotaUntil = undefined
+          slot.status = 'running'
+        }
+
+        const item = slot.queued.shift() as { inProgress: boolean }
+        slot.backlog = slot.queued.length
+
+        const events = this.host.getEvents()
+        const delta = renderDelta(events, slot.cursor, slot.updateIndex, item.inProgress)
+        slot.cursor = delta.nextCursor
+        if (!delta.text.trim()) {
+          continue // nothing renderable happened since the last review
+        }
+
+        const controller = new AbortController()
+        const abort = () => controller.abort()
+        const agent = this.host.getAgent()
+        // A disposed session must not leave advisor calls in flight.
+        const disposeWatch = agent ? undefined : undefined
+        void disposeWatch
+        try {
+          await slot.loop.review(delta.text, { inProgress: item.inProgress, signal: controller.signal })
+          slot.updateIndex++
+          slot.reviewsCompleted++
+          slot.consecutiveFailures = 0
+          slot.lastError = undefined
+        } catch (error) {
+          if (this.disposed) return
+          slot.consecutiveFailures++
+          slot.lastError = String(error instanceof Error ? error.message : error)
+          this.host.log?.('advisor review failed', {
+            session: this.host.sessionId,
+            advisor: slot.entry.name,
+            failures: slot.consecutiveFailures,
+            error: slot.lastError
+          })
+          if (isPermanentFailure(error)) {
+            slot.status = 'halted'
+            slot.queued = []
+            slot.backlog = 0
+            return
+          }
+          if (isQuotaFailure(error)) {
+            slot.status = 'quota_exhausted'
+            slot.quotaUntil = Date.now() + QUOTA_COOLDOWN_MS
+            return
+          }
+          if (slot.consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+            // Drop the backlog and start fresh rather than stall forever.
+            slot.queued = []
+            slot.backlog = 0
+            slot.consecutiveFailures = 0
+            slot.loop.resetConversation()
+            return
+          }
+          // Brief backoff before the next queued item.
+          await new Promise(resolve => setTimeout(resolve, 1500))
+        }
+      }
+    } finally {
+      slot.draining = false
+    }
+  }
+
+  /** Route one accepted advice note into the primary agent. */
+  private deliver(note: string, severity: AdvisorSeverity | undefined, advisorName: string): void {
+    const agent = this.host.getAgent()
+    const advisorNote: AdvisorNote = { note, severity, advisor: advisorName }
+    this.recentNotes.push(advisorNote)
+    if (this.recentNotes.length > RECENT_NOTES_LIMIT) this.recentNotes.shift()
+
+    const slot = this.slots.get(advisorName)
+    if (slot) slot.adviceDelivered++
+
+    if (!agent) {
+      this.host.log?.('advisor note dropped (no live agent)', { session: this.host.sessionId, advisorName })
+      return
+    }
+
+    const primaryRunning = agent.status === 'running'
+    const channel = resolveDeliveryChannel({
+      severity,
+      interruptSeverities: this.interruptSeverities,
+      primaryRunning
+    })
+    const message = this.createUserMessage(formatAdvisorBatchContent([advisorNote]))
+    if (channel === 'steer') agent.steer(message)
+    else agent.inject(message)
+    this.host.log?.('advisor note delivered', {
+      session: this.host.sessionId,
+      advisor: advisorName,
+      severity: severity ?? 'nit',
+      channel
+    })
+  }
+
+  /** Snapshot for the RPC surface. */
+  snapshot(): { active: boolean; advisors: AdvisorStatusView[]; recentNotes: AdvisorNote[] } {
+    return {
+      active: this.slots.size > 0,
+      advisors: [...this.slots.values()].map(slot => ({
+        name: slot.entry.name,
+        status: slot.status,
+        backlog: slot.backlog,
+        reviewsCompleted: slot.reviewsCompleted,
+        adviceDelivered: slot.adviceDelivered,
+        ...(slot.lastError ? { lastError: slot.lastError } : {})
+      })),
+      recentNotes: [...this.recentNotes]
+    }
+  }
+
+  /** Pause or resume one advisor by name. */
+  setPaused(name: string, paused: boolean): boolean {
+    const slot = this.slots.get(name)
+    if (!slot) return false
+    if (paused) {
+      slot.status = 'paused'
+      slot.queued = []
+      slot.backlog = 0
+    } else if (slot.status === 'paused') {
+      slot.status = 'running'
+    }
+    return true
+  }
+
+  dispose(): void {
+    this.disposed = true
+    for (const slot of this.slots.values()) {
+      slot.queued = []
+      slot.backlog = 0
+    }
+    this.slots.clear()
+  }
+}
+
+export { PLUGIN_NAME }

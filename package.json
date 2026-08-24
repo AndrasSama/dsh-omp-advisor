@@ -1,0 +1,52 @@
+{
+  "name": "dsh-omp-advisor",
+  "version": "0.1.0",
+  "description": "oh-my-pi advisor subsystem ported to DeepSeek Harness: independent reviewer models watch your agent's live transcript, investigate with read-only tools, and advise it — nit injects, concern/blocker steer.",
+  "license": "MIT",
+  "type": "module",
+  "main": "lib/index.js",
+  "files": [
+    "lib",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE",
+    "NOTICE-oh-my-pi-LICENSE"
+  ],
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "advisor",
+    "oh-my-pi"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/AndrasSama/dsh-omp-advisor.git"
+  },
+  "scripts": {
+    "build": "node build.mjs",
+    "prepare": "node build.mjs || echo \"dsh-omp-advisor: build skipped, using prebuilt lib/\"",
+    "test": "node test/run.mjs",
+    "typecheck": "tsc --noEmit"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-connection",
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-api-remotes"
+      ]
+    }
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/react": "^19.0.0",
+    "esbuild": "^0.25.0",
+    "typescript": "^5.7.0"
+  }
+}

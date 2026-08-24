@@ -1,0 +1,9 @@
+# The dsh-omp-advisor bundle patch: one row mounting the host service. The
+# browser half (settings section) ships through package.json's dsh.client
+# declaration. Defaults here are the composition base layer; the user's
+# settings document (namespace `dsh-omp-advisor`) overrides them live.
+- insert:
+    - id: dsh-omp-advisor
+      name: dsh-omp-advisor
+      config:
+        enabled: false
