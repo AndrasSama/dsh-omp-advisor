@@ -12,7 +12,7 @@
 import * as React from 'react'
 import { fetchModelCatalog, unwrapRpcResult, type ModelCatalog } from './model-catalog'
 
-const { useCallback, useEffect, useMemo, useState } = React
+const { useCallback, useEffect, useMemo, useRef, useState } = React
 
 /* ------------------------------ local contracts ----------------------------- */
 
@@ -83,7 +83,8 @@ const styles: Record<string, React.CSSProperties> = {
     padding: '5px 8px',
     color: 'inherit',
     font: 'inherit',
-    maxWidth: 320
+    maxWidth: 320,
+    textAlign: 'center'
   },
   button: {
     border: '1px solid var(--dsh-border, rgba(128,128,128,0.3))',
@@ -138,11 +139,25 @@ const STATUS_COLORS: Record<string, string> = {
 
 export function createSettingsSection(ctx: ClientCtx): React.ComponentType<{ close?: () => void }> {
   return function OmpAdvisorSettingsSection() {
+    // Server truth (snapshot poll + settled writes) and an optimistic draft
+    // laid over it while writes are crossing the wire. Rendering reads the
+    // draft first, so every control reflects a change the instant it happens
+    // instead of after the RPC round-trip — and fast typing cannot lose
+    // characters to an in-flight response clobbering the input.
     const [view, setView] = useState<SnapshotView | null>(null)
+    const [draft, setDraft] = useState<SettingsView | null>(null)
     const [phase, setPhase] = useState<'loading' | 'ready' | 'error'>('loading')
     const [writeError, setWriteError] = useState<string | null>(null)
     const [catalog, setCatalog] = useState<ModelCatalog | null>(null)
     const [catalogError, setCatalogError] = useState<string | null>(null)
+
+    const viewRef = useRef<SnapshotView | null>(null)
+    viewRef.current = view
+    // Serialized write queue: patches reach the host in edit order, and the
+    // draft only clears once the last queued write has settled.
+    const queueRef = useRef<Promise<unknown>>(Promise.resolve())
+    const pendingRef = useRef(0)
+    const settledSettingsRef = useRef<SettingsView | null>(null)
 
     useEffect(() => {
       let cancelled = false
@@ -167,8 +182,11 @@ export function createSettingsSection(ctx: ClientCtx): React.ComponentType<{ clo
             // rpc.call resolves to the RpcResult itself; unwrap {ok, value}.
             const value = unwrapRpcResult<SnapshotView>(result, 'advisor snapshot')
             if (cancelled) return
-            setView(value)
             setPhase('ready')
+            // Never clobber an in-flight optimistic edit with stale poll data.
+            if (pendingRef.current > 0) return
+            settledSettingsRef.current = value.settings
+            setView(value)
           })
           .catch(() => {
             // Keep the last good view; only flip to error before first success.
@@ -185,18 +203,34 @@ export function createSettingsSection(ctx: ClientCtx): React.ComponentType<{ clo
 
     const write = useCallback((field: string, next: unknown) => {
       setWriteError(null)
-      void ctx.connection.rpc
-        .call('/dsh-omp-advisor', 'update', { patch: { [field]: next } })
+      // 1. Optimistic apply — the UI reflects the edit this frame.
+      setDraft(current => {
+        const base = current ?? settledSettingsRef.current ?? viewRef.current?.settings
+        if (!base) return current
+        return { ...base, [field]: next }
+      })
+      // 2. Queue the host write so concurrent edits apply in order.
+      pendingRef.current += 1
+      queueRef.current = queueRef.current
+        .then(() => ctx.connection.rpc.call('/dsh-omp-advisor', 'update', { patch: { [field]: next } }))
         .then(result => {
-          const value = unwrapRpcResult<{ settings: SettingsView }>(result, 'advisor settings update')
-          setView(current => (current ? { ...current, settings: value.settings } : current))
+          const updated = unwrapRpcResult<{ settings: SettingsView }>(result, 'advisor settings update')
+          settledSettingsRef.current = updated.settings
         })
         .catch((err: unknown) => {
           setWriteError(String(err instanceof Error ? err.message : err))
         })
+        .finally(() => {
+          pendingRef.current -= 1
+          if (pendingRef.current !== 0) return
+          // Queue drained: server truth has caught up; drop the overlay.
+          const settled = settledSettingsRef.current
+          if (settled) setView(current => (current ? { ...current, settings: settled } : current))
+          setDraft(null)
+        })
     }, [])
 
-    const value = view?.settings
+    const value = draft ?? view?.settings
     const advisors = useMemo<AdvisorEntryView[]>(() => value?.advisors ?? [], [value])
 
     const updateAdvisor = useCallback(
@@ -429,14 +463,14 @@ export function createSettingsSection(ctx: ClientCtx): React.ComponentType<{ clo
 
         <div style={styles.card}>
           <strong>Live status</strong>
-          {!view.sessions || view.sessions.length === 0 ? (
+          {(view?.sessions ?? []).length === 0 ? (
             <span style={styles.hint}>
               {value.enabled
                 ? 'No sessions with attached advisors yet. Start a session and advisors will attach.'
                 : 'Advisors are disabled.'}
             </span>
           ) : (
-            view.sessions.map(session => (
+            (view?.sessions ?? []).map(session => (
               <div key={session.sessionId} style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                 <span style={styles.hint}>session {session.sessionId}</span>
                 <div style={styles.row}>
