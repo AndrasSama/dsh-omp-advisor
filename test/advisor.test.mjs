@@ -5,6 +5,7 @@ import {
   AdviseGate,
   AdvisorLoop,
   AdvisorOutputQuarantinedError,
+  SessionAdvisorRuntime,
   formatAdvisorBatchContent,
   normalizeSettings,
   normalizeSettingsLenient,
@@ -609,4 +610,170 @@ test('package.json dsh.client.inject keeps the module-graph package names', asyn
     '@deepseek-ai/dsh-client-connection',
     '@deepseek-ai/dsh-client-ui-settings'
   ])
+})
+
+/* ------------------------- settings: skills / preset / coalesce ------------------------- */
+
+test('normalizeSettings passes skills and preset through, clamps adviceCoalesceMs', () => {
+  const value = normalizeSettings({
+    enabled: true,
+    adviceCoalesceMs: 25000,
+    advisors: [
+      {
+        name: 'warden',
+        provider: 'p',
+        model: 'm',
+        maxTurns: 4,
+        skills: ['tool-loop-detection', '', 'side-effect-call-gating'],
+        preset: 'tool-warden'
+      }
+    ]
+  })
+  assert.equal(value.adviceCoalesceMs, 10000)
+  assert.deepEqual(value.advisors[0].skills, ['tool-loop-detection', 'side-effect-call-gating'])
+  assert.equal(value.advisors[0].preset, 'tool-warden')
+})
+
+test('normalizeSettings clamps negative and fractional coalesce values', () => {
+  assert.equal(normalizeSettings({ adviceCoalesceMs: -5 }).adviceCoalesceMs, 0)
+  assert.equal(normalizeSettings({ adviceCoalesceMs: 123.7 }).adviceCoalesceMs, 124)
+  assert.equal(normalizeSettings({ adviceCoalesceMs: 'nope' }).adviceCoalesceMs, 0)
+  assert.equal(normalizeSettings({}).adviceCoalesceMs, 0)
+})
+
+test('normalizeSettingsLenient round-trips skills, preset, and coalesce window', () => {
+  const value = normalizeSettingsLenient({
+    adviceCoalesceMs: 800,
+    advisors: [
+      { name: '', provider: '', model: '', skills: ['a-b-test-hypothesis'], preset: 'conversion-alchemist' }
+    ]
+  })
+  assert.equal(value.adviceCoalesceMs, 800)
+  assert.deepEqual(value.advisors[0].skills, ['a-b-test-hypothesis'])
+  assert.equal(value.advisors[0].preset, 'conversion-alchemist')
+})
+
+/* ------------------------------ advisor loop: skills ------------------------------ */
+
+test('advisor loop injects packaged skills into the system prompt', async () => {
+  const llm = mockLlm([[{ type: 'text', text: 'reviewed' }]])
+  const loop = new AdvisorLoop(
+    { llm, cwd: process.cwd(), onAdvice: () => {} },
+    { ...baseEntry, skills: ['defensive-patterns', 'not-a-packaged-skill'] }
+  )
+  await loop.review('## Update 1\n\n### User\nhello', {
+    inProgress: false,
+    signal: new AbortController().signal
+  })
+  const system = llm.calls[0].system
+  assert.match(system, /<skills>/)
+  assert.match(system, /<skill name="defensive-patterns">/)
+  assert.match(system, /## Watch for/)
+  // Unknown skill ids are skipped, never rendered.
+  assert.doesNotMatch(system, /not-a-packaged-skill/)
+})
+
+test('advisor loop omits the skills block when no skills are configured', async () => {
+  const llm = mockLlm([[{ type: 'text', text: 'reviewed' }]])
+  const loop = new AdvisorLoop({ llm, cwd: process.cwd(), onAdvice: () => {} }, baseEntry)
+  await loop.review('## Update 1\n\n### User\nhello', {
+    inProgress: false,
+    signal: new AbortController().signal
+  })
+  assert.doesNotMatch(llm.calls[0].system, /<skills>/)
+})
+
+/* ------------------------------ runtime: advice coalescing ------------------------------ */
+
+function stubAgent(status = 'idle') {
+  const injected = []
+  const steered = []
+  return {
+    injected,
+    steered,
+    id: 'agent-1',
+    status,
+    session: { id: 's1', events: [] },
+    inject(message) {
+      injected.push(message)
+    },
+    steer(message) {
+      steered.push(message)
+    },
+    followup() {}
+  }
+}
+
+function makeRuntime({ coalesceMs = 0, severities = ['concern', 'blocker'], agent }) {
+  const host = {
+    sessionId: 's1',
+    getAgent: () => agent,
+    getEvents: () => [],
+    cwd: process.cwd(),
+    llm: {
+      stream() {
+        throw new Error('llm not used in coalesce tests')
+      }
+    },
+    makeUserMessage: text => ({ kind: 'user', text }),
+    log: () => {}
+  }
+  const settings = {
+    enabled: true,
+    reviewTrigger: 'turn',
+    interruptSeverities: severities,
+    adviceCoalesceMs: coalesceMs,
+    advisors: [{ name: 'a', provider: 'p', model: 'm', maxTurns: 1 }]
+  }
+  return new SessionAdvisorRuntime(host, settings, text => ({ kind: 'user', text }))
+}
+
+test('coalesce off (0ms) delivers every note immediately', () => {
+  const agent = stubAgent()
+  const runtime = makeRuntime({ coalesceMs: 0, agent })
+  runtime.deliver('note one', 'nit', 'a')
+  runtime.deliver('note two', 'nit', 'a')
+  assert.equal(agent.injected.length, 2)
+  assert.equal(agent.steered.length, 0)
+  runtime.dispose()
+})
+
+test('coalesce window batches notes from all advisors into one inject message', async () => {
+  const agent = stubAgent()
+  const runtime = makeRuntime({ coalesceMs: 40, agent })
+  runtime.deliver('note one', 'nit', 'a')
+  runtime.deliver('note two', 'nit', 'a')
+  // Still inside the window: nothing delivered yet.
+  assert.equal(agent.injected.length, 0)
+  assert.equal(agent.steered.length, 0)
+  await new Promise(resolve => setTimeout(resolve, 100))
+  assert.equal(agent.injected.length, 1)
+  assert.match(agent.injected[0].text, /note one/)
+  assert.match(agent.injected[0].text, /note two/)
+  runtime.dispose()
+})
+
+test('interrupting severity flushes the batch at once and splits steer/inject channels', () => {
+  const agent = stubAgent('running')
+  const runtime = makeRuntime({ coalesceMs: 5000, severities: ['concern', 'blocker'], agent })
+  runtime.deliver('minor nit', 'nit', 'a')
+  assert.equal(agent.injected.length + agent.steered.length, 0)
+  runtime.deliver('real concern', 'concern', 'a')
+  // Immediate flush: concern steers the running primary, nit rides as injection.
+  assert.equal(agent.steered.length, 1)
+  assert.match(agent.steered[0].text, /real concern/)
+  assert.doesNotMatch(agent.steered[0].text, /minor nit/)
+  assert.equal(agent.injected.length, 1)
+  assert.match(agent.injected[0].text, /minor nit/)
+  runtime.dispose()
+})
+
+test('dispose cancels the coalesce timer and drops buffered notes', async () => {
+  const agent = stubAgent()
+  const runtime = makeRuntime({ coalesceMs: 40, agent })
+  runtime.deliver('buffered note', 'nit', 'a')
+  runtime.dispose()
+  await new Promise(resolve => setTimeout(resolve, 100))
+  assert.equal(agent.injected.length, 0)
+  assert.equal(agent.steered.length, 0)
 })

@@ -21,6 +21,11 @@ const advisorEntrySchema = z.object({
     .default(4)
     .description('Max advisor tool-loop turns per review (investigation budget).'),
   instructions: z.string().description('Optional specialization appended to the shared advisor baseline.'),
+  skills: z
+    .array(z.string())
+    .default([])
+    .description('Packaged skill ids injected into this advisor\'s context (see skills/ in the plugin).'),
+  preset: z.string().description('Id of the built-in preset this advisor was created from (for skill resets).'),
   enabled: z.boolean().default(true).description('Per-advisor on/off toggle.')
 })
 
@@ -34,8 +39,22 @@ export const advisorSettingsSchema = z.object({
     .array(z.union(['nit', 'concern', 'blocker']))
     .default(['concern', 'blocker'])
     .description('Severities delivered as steering (nearest step boundary); others ride non-interrupting context.'),
+  adviceCoalesceMs: z
+    .number()
+    .min(0)
+    .max(10000)
+    .default(0)
+    .description(
+      '0 = deliver each advice note individually. >0 = collect notes from all advisors for this many ms and deliver them as one batched advisory message (interrupting severities still flush immediately).'
+    ),
   advisors: z.array(advisorEntrySchema).default([]).description('Advisor roster.')
 })
+
+/** Clamp the advice coalesce window to the schema bounds (ms; 0 = off). */
+function coerceCoalesceMs(raw: unknown): number {
+  const value = typeof raw === 'number' && Number.isFinite(raw) ? raw : 0
+  return Math.min(10000, Math.max(0, Math.round(value)))
+}
 
 /** Normalize a resolved settings value (defensive; the schema already validates). */
 export function normalizeSettings(raw: unknown): AdvisorSettings {
@@ -61,6 +80,14 @@ export function normalizeSettings(raw: unknown): AdvisorSettings {
       ...(typeof entry.instructions === 'string' && entry.instructions.trim()
         ? { instructions: entry.instructions.trim() }
         : {}),
+      ...(Array.isArray(entry.skills)
+        ? {
+            skills: entry.skills.filter(
+              (s): s is string => typeof s === 'string' && s.trim() !== ''
+            )
+          }
+        : {}),
+      ...(typeof entry.preset === 'string' && entry.preset ? { preset: entry.preset } : {}),
       enabled: entry.enabled !== false
     })
   }
@@ -73,6 +100,7 @@ export function normalizeSettings(raw: unknown): AdvisorSettings {
     enabled: value.enabled === true,
     reviewTrigger: value.reviewTrigger === 'step' ? 'step' : 'turn',
     interruptSeverities: severities,
+    adviceCoalesceMs: coerceCoalesceMs((value as { adviceCoalesceMs?: unknown }).adviceCoalesceMs),
     advisors: deduped
   }
 }
@@ -102,6 +130,10 @@ export function normalizeSettingsLenient(raw: unknown): AdvisorSettings {
         : {}),
       maxTurns: Math.min(10, Math.max(1, Math.round(e.maxTurns || 4))),
       ...(typeof e.instructions === 'string' ? { instructions: e.instructions } : {}),
+      ...(Array.isArray(e.skills)
+        ? { skills: e.skills.filter((s): s is string => typeof s === 'string') }
+        : {}),
+      ...(typeof e.preset === 'string' ? { preset: e.preset } : {}),
       enabled: e.enabled !== false
     })
   }
@@ -114,6 +146,7 @@ export function normalizeSettingsLenient(raw: unknown): AdvisorSettings {
     enabled: value.enabled === true,
     reviewTrigger: value.reviewTrigger === 'step' ? 'step' : 'turn',
     interruptSeverities: severities,
+    adviceCoalesceMs: coerceCoalesceMs((value as { adviceCoalesceMs?: unknown }).adviceCoalesceMs),
     advisors: preserved
   }
 }

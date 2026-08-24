@@ -19,6 +19,7 @@ import type { AdvisorEntry, AdvisorSeverity, LlmContentBlock, LlmLike, LlmStream
 import systemPrompt from './prompts/system.md'
 import adviseToolPrompt from './prompts/advise-tool.md'
 import contextFilesTemplate from './prompts/context-files.md'
+import { PACKAGED_SKILLS } from './skills.generated'
 
 /** Soft character budget for the advisor's own conversation before a reset. */
 const CONTEXT_CHAR_BUDGET = 400_000
@@ -142,6 +143,19 @@ export class AdvisorLoop {
     this.gate.resetDeliveredNotes()
   }
 
+  private skillsText(): string {
+    const ids = this.entry.skills ?? []
+    if (ids.length === 0) return ''
+    const bodies: string[] = []
+    for (const id of ids) {
+      const skill = PACKAGED_SKILLS[id]
+      if (!skill) continue // unknown ids are skipped, never fatal
+      bodies.push(`<skill name="${skill.id}">\n${skill.body}\n</skill>`)
+    }
+    if (bodies.length === 0) return ''
+    return `<skills>\n${bodies.join('\n')}\n</skills>`
+  }
+
   private systemText(): string {
     const parts = [systemPrompt.trim()]
     if (this.contextFilesText) parts.push(this.contextFilesText)
@@ -149,6 +163,8 @@ export class AdvisorLoop {
     if (this.entry.instructions?.trim()) {
       parts.push(`<specialization>\n${this.entry.instructions.trim()}\n</specialization>`)
     }
+    const skills = this.skillsText()
+    if (skills) parts.push(skills)
     return parts.join('\n\n')
   }
 

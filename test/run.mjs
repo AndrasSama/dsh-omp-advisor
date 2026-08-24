@@ -6,6 +6,13 @@ import { dirname, join } from 'node:path'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 
+// Regenerate the embedded skill files so tests always see the skills/ tree.
+const gen = spawnSync(process.execPath, [join(root, 'scripts/gen-skills.mjs')], {
+  stdio: 'inherit',
+  cwd: root
+})
+if (gen.status !== 0) process.exit(gen.status ?? 1)
+
 await build({
   entryPoints: [join(root, 'test/entry.ts')],
   outfile: join(root, 'test/.bundle.mjs'),

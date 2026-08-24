@@ -8,7 +8,7 @@
  * deviation: the primary agent is never blocked on an advisor.
  */
 import { AdvisorLoop } from './advisor-loop'
-import { formatAdvisorBatchContent, resolveDeliveryChannel } from './delivery'
+import { formatAdvisorBatchContent, isInterruptingSeverity, resolveDeliveryChannel } from './delivery'
 import { PLUGIN_NAME, renderDelta } from './delta'
 import type {
   AdvisorEntry,
@@ -79,6 +79,11 @@ export class SessionAdvisorRuntime {
   private disposed = false
   private recentNotes: AdvisorNote[] = []
   private interruptSeverities: AdvisorSeverity[]
+  /** Advice coalesce window (ms); 0 delivers each note individually. */
+  private coalesceMs = 0
+  /** Notes buffered inside the coalesce window, across all advisors. */
+  private pendingNotes: AdvisorNote[] = []
+  private coalesceTimer?: ReturnType<typeof setTimeout>
 
   constructor(
     private readonly host: SessionRuntimeHost,
@@ -93,6 +98,7 @@ export class SessionAdvisorRuntime {
   rebuild(settings: AdvisorSettings): void {
     if (this.disposed) return
     this.interruptSeverities = [...settings.interruptSeverities]
+    this.coalesceMs = Math.max(0, settings.adviceCoalesceMs || 0)
     const next = new Map<string, AdvisorSlot>()
     for (const entry of settings.advisors) {
       const key = entry.name
@@ -227,9 +233,13 @@ export class SessionAdvisorRuntime {
     }
   }
 
-  /** Route one accepted advice note into the primary agent. */
+  /**
+   * Route one accepted advice note into the primary agent. With coalescing
+   * enabled, non-interrupting notes from all advisors are buffered for the
+   * coalesce window and emitted as one batched message; an interrupting note
+   * flushes the whole batch immediately so a blocker never waits.
+   */
   private deliver(note: string, severity: AdvisorSeverity | undefined, advisorName: string): void {
-    const agent = this.host.getAgent()
     const advisorNote: AdvisorNote = { note, severity, advisor: advisorName }
     this.recentNotes.push(advisorNote)
     if (this.recentNotes.length > RECENT_NOTES_LIMIT) this.recentNotes.shift()
@@ -237,25 +247,74 @@ export class SessionAdvisorRuntime {
     const slot = this.slots.get(advisorName)
     if (slot) slot.adviceDelivered++
 
-    if (!agent) {
+    if (!this.host.getAgent()) {
       this.host.log?.('advisor note dropped (no live agent)', { session: this.host.sessionId, advisorName })
       return
     }
 
+    if (this.coalesceMs <= 0) {
+      this.emitNotes([advisorNote])
+      return
+    }
+
+    this.pendingNotes.push(advisorNote)
+    if (isInterruptingSeverity(severity, this.interruptSeverities)) {
+      this.flushNotes()
+      return
+    }
+    if (this.coalesceTimer === undefined) {
+      this.coalesceTimer = setTimeout(() => {
+        this.coalesceTimer = undefined
+        this.flushNotes()
+      }, this.coalesceMs)
+    }
+  }
+
+  /** Flush the coalesce buffer now (timer cancelled, notes emitted together). */
+  private flushNotes(): void {
+    if (this.coalesceTimer !== undefined) {
+      clearTimeout(this.coalesceTimer)
+      this.coalesceTimer = undefined
+    }
+    const notes = this.pendingNotes
+    this.pendingNotes = []
+    if (notes.length > 0) this.emitNotes(notes)
+  }
+
+  /** Emit a batch of notes, grouped by delivery channel (one message per channel). */
+  private emitNotes(notes: AdvisorNote[]): void {
+    const agent = this.host.getAgent()
+    if (!agent) {
+      this.host.log?.('advisor notes dropped (no live agent)', {
+        session: this.host.sessionId,
+        count: notes.length
+      })
+      return
+    }
     const primaryRunning = agent.status === 'running'
-    const channel = resolveDeliveryChannel({
-      severity,
-      interruptSeverities: this.interruptSeverities,
-      primaryRunning
-    })
-    const message = this.createUserMessage(formatAdvisorBatchContent([advisorNote]))
-    if (channel === 'steer') agent.steer(message)
-    else agent.inject(message)
-    this.host.log?.('advisor note delivered', {
+    const steerNotes: AdvisorNote[] = []
+    const injectNotes: AdvisorNote[] = []
+    for (const advisorNote of notes) {
+      const channel = resolveDeliveryChannel({
+        severity: advisorNote.severity,
+        interruptSeverities: this.interruptSeverities,
+        primaryRunning
+      })
+      if (channel === 'steer') steerNotes.push(advisorNote)
+      else injectNotes.push(advisorNote)
+    }
+    if (injectNotes.length > 0) {
+      agent.inject(this.createUserMessage(formatAdvisorBatchContent(injectNotes)))
+    }
+    if (steerNotes.length > 0) {
+      agent.steer(this.createUserMessage(formatAdvisorBatchContent(steerNotes)))
+    }
+    this.host.log?.('advisor notes delivered', {
       session: this.host.sessionId,
-      advisor: advisorName,
-      severity: severity ?? 'nit',
-      channel
+      count: notes.length,
+      injected: injectNotes.length,
+      steered: steerNotes.length,
+      coalesced: notes.length > 1
     })
   }
 
@@ -291,6 +350,12 @@ export class SessionAdvisorRuntime {
 
   dispose(): void {
     this.disposed = true
+    if (this.coalesceTimer !== undefined) {
+      clearTimeout(this.coalesceTimer)
+      this.coalesceTimer = undefined
+    }
+    // Buffered notes are dropped: a disposed session must not receive advice.
+    this.pendingNotes = []
     for (const slot of this.slots.values()) {
       slot.queued = []
       slot.backlog = 0

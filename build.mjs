@@ -3,8 +3,13 @@
 // resolves them. React is provided by the host page for the client bundle.
 import { build } from 'esbuild'
 import { mkdirSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
 
 mkdirSync('lib', { recursive: true })
+
+// Embed packaged skills before bundling (host + client generated files).
+const gen = spawnSync(process.execPath, ['scripts/gen-skills.mjs'], { stdio: 'inherit' })
+if (gen.status !== 0) process.exit(gen.status ?? 1)
 
 const pkg = JSON.parse((await import('node:fs')).readFileSync('package.json', 'utf8'))
 

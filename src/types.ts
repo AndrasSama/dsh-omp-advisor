@@ -36,6 +36,10 @@ export interface AdvisorEntry {
   maxTurns: number
   /** Specialization appended to the shared advisor baseline prompt. */
   instructions?: string
+  /** Packaged skill ids (skills/<id>/SKILL.md) injected into this advisor's context. */
+  skills?: string[]
+  /** Built-in preset id this advisor was created from (enables "reset to preset skills"). */
+  preset?: string
   /** Per-advisor on/off toggle (default true). */
   enabled?: boolean
 }
@@ -45,6 +49,12 @@ export interface AdvisorSettings {
   enabled: boolean
   reviewTrigger: 'step' | 'turn'
   interruptSeverities: AdvisorSeverity[]
+  /**
+   * Advice coalesce window in ms. 0 = deliver each note individually;
+   * >0 = batch notes from all advisors into one message per window
+   * (interrupting severities flush the batch immediately).
+   */
+  adviceCoalesceMs: number
   advisors: AdvisorEntry[]
 }
 

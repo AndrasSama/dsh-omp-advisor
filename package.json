@@ -1,6 +1,6 @@
 {
   "name": "dsh-omp-advisor",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "oh-my-pi advisor subsystem ported to DeepSeek Harness: independent reviewer models watch your agent's live transcript, investigate with read-only tools, and advise it — nit injects, concern/blocker steer.",
   "license": "MIT",
   "type": "module",
@@ -12,6 +12,7 @@
   },
   "files": [
     "lib",
+    "skills",
     "cordis.patch.yml",
     "README.md",
     "LICENSE",

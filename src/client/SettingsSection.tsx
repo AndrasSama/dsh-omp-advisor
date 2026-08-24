@@ -11,6 +11,8 @@
  */
 import * as React from 'react'
 import { fetchModelCatalog, unwrapRpcResult, type ModelCatalog } from './model-catalog'
+import { ADVISOR_PRESETS, findPreset } from './presets'
+import { SKILL_CATALOG } from './skill-catalog.generated'
 
 const { useCallback, useEffect, useMemo, useRef, useState } = React
 
@@ -24,12 +26,15 @@ interface AdvisorEntryView {
   maxTurns: number
   instructions?: string
   enabled?: boolean
+  skills?: string[]
+  preset?: string
 }
 
 interface SettingsView {
   enabled: boolean
   reviewTrigger: 'step' | 'turn'
   interruptSeverities: ('nit' | 'concern' | 'blocker')[]
+  adviceCoalesceMs: number
   advisors: AdvisorEntryView[]
 }
 
@@ -320,6 +325,33 @@ export function createSettingsSection(ctx: ClientCtx): React.ComponentType<{ clo
       ])
     }, [advisors, catalog, write])
 
+    const applyPreset = useCallback(
+      (presetId: string) => {
+        const preset = findPreset(presetId)
+        if (!preset) return
+        const firstGroup = catalog?.groups.find(group => group.models.length > 0)
+        const firstModel = firstGroup?.models[0]
+        const baseNames = new Set(advisors.map(entry => entry.name))
+        let name = preset.name
+        let suffix = 2
+        while (baseNames.has(name)) name = `${preset.name} ${suffix++}`
+        write('advisors', [
+          ...advisors,
+          {
+            name,
+            provider: firstGroup?.id ?? '',
+            model: firstModel?.id ?? '',
+            maxTurns: 4,
+            instructions: preset.soul,
+            skills: [...preset.skills],
+            preset: preset.id,
+            enabled: true
+          }
+        ])
+      },
+      [advisors, catalog, write]
+    )
+
     if (!value) {
       if (phase === 'loading') {
         return <div style={styles.root}>Loading advisor settings…</div>
@@ -385,12 +417,53 @@ export function createSettingsSection(ctx: ClientCtx): React.ComponentType<{ clo
             ))}
             <span style={styles.hint}>Checked severities steer at the nearest step boundary; others ride as non-interrupting context.</span>
           </div>
+          <div style={styles.row}>
+            <span style={styles.label}>Coalesce advice (ms)</span>
+            <input
+              type="number"
+              min={0}
+              max={10000}
+              step={100}
+              style={{ ...styles.input, width: 90 }}
+              value={value.adviceCoalesceMs ?? 0}
+              onChange={event => {
+                const parsed = Number.parseInt(event.target.value, 10)
+                if (Number.isFinite(parsed)) {
+                  write('adviceCoalesceMs', Math.min(10000, Math.max(0, parsed)))
+                }
+              }}
+            />
+            <span style={styles.hint}>
+              0 = deliver each note immediately. Above 0, notes from all advisors are batched within the window
+              into one message per channel; an interrupting severity flushes the batch at once.
+            </span>
+          </div>
         </div>
 
         <div style={styles.card}>
           <div style={styles.row}>
             <strong>Advisors</strong>
             <span style={styles.hint}>Each advisor reviews transcript updates with its own model and read-only tools.</span>
+          </div>
+          <div style={styles.row}>
+            <span style={styles.label}>Add from preset</span>
+            <select
+              style={styles.select}
+              value=""
+              onChange={event => {
+                if (event.target.value) applyPreset(event.target.value)
+              }}
+            >
+              <option value="">— choose a preset advisor —</option>
+              {ADVISOR_PRESETS.map(preset => (
+                <option key={preset.id} value={preset.id} title={preset.description}>
+                  {preset.name} · {preset.role}
+                </option>
+              ))}
+            </select>
+            <span style={styles.hint}>
+              Presets create a ready-made advisor with an expanded persona and 10 curated skills.
+            </span>
           </div>
 
           {catalogError && (
@@ -500,6 +573,79 @@ export function createSettingsSection(ctx: ClientCtx): React.ComponentType<{ clo
                   value={entry.instructions ?? ''}
                   onChange={event => updateAdvisor(index, { instructions: event.target.value })}
                 />
+                {(() => {
+                  const skills = entry.skills ?? []
+                  const preset = entry.preset ? findPreset(entry.preset) : undefined
+                  const available = SKILL_CATALOG.filter(item => !skills.includes(item.id))
+                  return (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                      <div style={styles.row}>
+                        <span style={{ ...styles.hint, minWidth: 150 }}>Skills ({skills.length})</span>
+                        {preset && (
+                          <>
+                            <span style={styles.hint}>preset: {preset.name}</span>
+                            <button
+                              style={styles.button}
+                              title={`Restore the ${skills.length ? 'curated' : ''} skill list of ${preset.name}`}
+                              onClick={() => updateAdvisor(index, { skills: [...preset.skills] })}
+                            >
+                              reset to preset defaults
+                            </button>
+                          </>
+                        )}
+                      </div>
+                      {skills.length > 0 && (
+                        <div style={{ ...styles.row, gap: 6 }}>
+                          {skills.map(skillId => {
+                            const meta = SKILL_CATALOG.find(item => item.id === skillId)
+                            return (
+                              <span
+                                key={skillId}
+                                style={styles.chip}
+                                title={meta?.description ?? 'Not packaged with this plugin version'}
+                              >
+                                {skillId}
+                                <button
+                                  style={{
+                                    border: 'none',
+                                    background: 'transparent',
+                                    color: 'inherit',
+                                    cursor: 'pointer',
+                                    padding: 0,
+                                    font: 'inherit',
+                                    lineHeight: 1
+                                  }}
+                                  title="Remove this skill"
+                                  onClick={() =>
+                                    updateAdvisor(index, { skills: skills.filter(id => id !== skillId) })
+                                  }
+                                >
+                                  ×
+                                </button>
+                              </span>
+                            )
+                          })}
+                        </div>
+                      )}
+                      <select
+                        style={styles.select}
+                        value=""
+                        onChange={event => {
+                          if (event.target.value) {
+                            updateAdvisor(index, { skills: [...skills, event.target.value] })
+                          }
+                        }}
+                      >
+                        <option value="">+ add packaged skill…</option>
+                        {available.map(item => (
+                          <option key={item.id} value={item.id} title={item.description}>
+                            {item.id}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  )
+                })()}
               </div>
             )
           })}

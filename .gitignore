@@ -2,3 +2,5 @@ node_modules/
 *.tsbuildinfo
 test/.bundle.mjs
 .DS_Store
+src/skills.generated.ts
+src/client/skill-catalog.generated.ts
