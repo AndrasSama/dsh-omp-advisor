@@ -407,13 +407,15 @@ test('advisor loop quarantines unsafe output before history', async () => {
 
 /* ------------------------------ registerAdvisorRpc ------------------------------ */
 
-function stubService() {
+function stubService(overrides = {}) {
   return {
     snapshot: sessionId => ({ sessionId, active: false, advisors: [], recentNotes: [] }),
     activeSessions: () => ['s1'],
     settings: { enabled: false },
     setPaused: () => true,
-    reviewNow: () => true
+    reviewNow: () => true,
+    updateSettings: patch => ({ enabled: true, ...patch }),
+    ...overrides
   }
 }
 
@@ -476,12 +478,46 @@ test('rpc registration is a no-op without a connection service', () => {
   assert.equal(typeof dispose, 'function')
 })
 
+test('rpc update merges settings through the service and answers them', async () => {
+  const { ctx, captured } = captureHandle()
+  const seen = []
+  registerAdvisorRpc(ctx, stubService({ updateSettings: patch => { seen.push(patch); return { enabled: true } } }))
+  const result = await captured.handler('update', { patch: { enabled: true } }, new AbortController().signal)
+  assert.equal(result.ok, true)
+  assert.deepEqual(result.value.settings, { enabled: true })
+  assert.deepEqual(seen, [{ enabled: true }])
+})
+
+test('rpc update rejects a non-object patch as bad-request (no throw)', async () => {
+  const { ctx, captured } = captureHandle()
+  registerAdvisorRpc(ctx, stubService())
+  const result = await captured.handler('update', { patch: ['enabled'] }, new AbortController().signal)
+  assert.equal(result.ok, false)
+  assert.equal(result.error.code, 'bad-request')
+})
+
+test('rpc update folds validation failures into bad-request (no throw)', async () => {
+  const { ctx, captured } = captureHandle()
+  registerAdvisorRpc(
+    ctx,
+    stubService({
+      updateSettings: () => {
+        throw new Error('advisor "x" needs both provider and model from the model list')
+      }
+    })
+  )
+  const result = await captured.handler('update', { patch: { advisors: [] } }, new AbortController().signal)
+  assert.equal(result.ok, false)
+  assert.equal(result.error.code, 'bad-request')
+  assert.match(result.error.message, /provider and model/)
+})
+
 /* ------------------------- client bundle contract ------------------------- */
 /*
  * Two-layer inject discipline (learned from a real boot failure):
  *  - package.json `dsh.client.inject` = module-graph deps → PACKAGE names.
  *  - the client module's exported `inject` = cordis service deps → SERVICE
- *    names (slots/connection/settingsScope). Exporting package names there
+ *    names (slots/connection). Exporting package names there
  *    strands the browser fiber pending forever, because no service is ever
  *    provided under a package name.
  */
@@ -517,10 +553,10 @@ test('client bundle exports service-name injects, not package names', async () =
   for (const name of exports.inject) {
     assert.ok(
       !name.startsWith('@deepseek-ai/'),
-      `module inject entry "${name}" is a package name — cordis waits for SERVICE names (slots/connection/settingsScope); package names belong in package.json dsh.client.inject`
+      `module inject entry "${name}" is a package name — cordis waits for SERVICE names (slots/connection); package names belong in package.json dsh.client.inject`
     )
   }
-  assert.deepEqual([...exports.inject].sort(), ['connection', 'settingsScope', 'slots'])
+  assert.deepEqual([...exports.inject].sort(), ['connection', 'slots'])
 })
 
 test('package.json dsh.client.inject keeps the module-graph package names', async () => {

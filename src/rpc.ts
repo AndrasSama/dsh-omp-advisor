@@ -1,7 +1,8 @@
 /**
- * The `/dsh-omp-advisor` RPC channel: live advisor status for the settings
- * section. Endpoints:
+ * The `/dsh-omp-advisor` RPC channel: live advisor status and settings writes
+ * for the settings section. Endpoints:
  *   snapshot  {sessionId?}            -> one session's advisor state (or all)
+ *   update    {patch}                 -> merge advisor settings; returns them
  *   pause     {sessionId, advisor}    -> pause one advisor
  *   resume    {sessionId, advisor}    -> resume one advisor
  *   reviewNow {sessionId}             -> queue an immediate review pass
@@ -14,6 +15,11 @@
  *    section works from remote GUIs too. `'loopback'` would 403 them.
  *  - Handlers return an RpcResult (`{ok:true,value}` / `{ok:false,error}`)
  *    and never throw: a thrown error becomes an opaque HTTP 500.
+ *
+ * Settings writes ride THIS channel instead of `ctx.settingsScope`: the
+ * scope's persistence is loopback-only by DSH policy (remote browsers get a
+ * process-local scope whose snapshot is permanently `unavailable`), while
+ * this channel's trusted-host fence works from remote GUIs.
  */
 import type { AdvisorService } from './service'
 import type { CordisContextLike } from './types'
@@ -66,6 +72,20 @@ export function registerAdvisorRpc(ctx: CordisContextLike, service: AdvisorServi
                 sessions: service.activeSessions().map(sessionId => service.snapshot(sessionId)),
                 settings: service.settings
               }
+            }
+          }
+          case 'update': {
+            let patch: unknown
+            try {
+              patch = record(payload.patch, 'payload.patch')
+            } catch (error) {
+              return badRequest(String(error instanceof Error ? error.message : error))
+            }
+            try {
+              return { ok: true, value: { settings: service.updateSettings(patch) } }
+            } catch (error) {
+              // Schema/validation rejections are user input errors.
+              return badRequest(String(error instanceof Error ? error.message : error))
             }
           }
           case 'pause':

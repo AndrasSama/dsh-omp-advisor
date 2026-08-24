@@ -11,12 +11,15 @@ export const name = 'dsh-omp-advisor'
  * Cordis SERVICE names this module consumes (NOT package names — those belong
  * in package.json `dsh.client.inject`, the module-graph layer). The browser
  * fiber waits until each name is provided in the client root context:
- *   slots         ← dsh-client-runtime (SlotRegistry)
- *   connection    ← dsh-client-connection
- *   settingsScope ← dsh-client-ui-settings
+ *   slots      ← dsh-client-runtime (SlotRegistry)
+ *   connection ← dsh-client-connection. Settings reads/writes ride the
+ *              plugin's own RPC channel, NOT ctx.settingsScope: settingsScope
+ *              persistence is loopback-only in DSH, so from remote browsers
+ *              its snapshot is permanently `unavailable` and would hide the
+ *              whole section.
  * Exporting package names here strands the fiber pending forever.
  */
-export const inject = ['slots', 'connection', 'settingsScope']
+export const inject = ['slots', 'connection']
 
 export function apply(ctx: any): void {
   ctx.effect(

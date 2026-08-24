@@ -1,12 +1,18 @@
 /**
  * The "OMP Advisor" settings section: master switch, review policy, and the
  * advisor roster with model pickers fed by the DSH model list, plus a live
- * status panel backed by the `/dsh-omp-advisor` RPC channel.
+ * status panel — all backed by the `/dsh-omp-advisor` RPC channel.
+ *
+ * Reads AND writes ride the plugin's own RPC channel instead of
+ * `ctx.settingsScope`: DSH keeps settingsScope persistence loopback-only
+ * (remote browsers get a process-local scope whose snapshot is permanently
+ * `unavailable`, which would hide this whole section from remote GUIs),
+ * while the channel's trusted-host fence works from anywhere the GUI works.
  */
 import * as React from 'react'
 import { fetchModelCatalog, unwrapRpcResult, type ModelCatalog } from './model-catalog'
 
-const { useCallback, useEffect, useMemo, useState, useSyncExternalStore } = React
+const { useCallback, useEffect, useMemo, useState } = React
 
 /* ------------------------------ local contracts ----------------------------- */
 
@@ -27,12 +33,6 @@ interface SettingsView {
   advisors: AdvisorEntryView[]
 }
 
-interface ScopeController {
-  getSnapshot(): { status: string; value?: SettingsView }
-  subscribe(callback: () => void): () => void
-  set(field: string, value: unknown): Promise<void>
-}
-
 interface AdvisorStatusView {
   name: string
   status: string
@@ -44,10 +44,10 @@ interface AdvisorStatusView {
 
 interface SnapshotView {
   sessions?: { sessionId: string; active: boolean; advisors: AdvisorStatusView[] }[]
+  settings: SettingsView
 }
 
 interface ClientCtx {
-  settingsScope: { bind(options: { namespace: string }): ScopeController }
   connection: {
     api: { llm: { models(request: Record<string, never>): Promise<unknown> } }
     rpc: { call(channel: string, endpoint: string, payload: unknown): Promise<unknown> }
@@ -137,17 +137,12 @@ const STATUS_COLORS: Record<string, string> = {
 /* --------------------------------- component -------------------------------- */
 
 export function createSettingsSection(ctx: ClientCtx): React.ComponentType<{ close?: () => void }> {
-  const scope = ctx.settingsScope.bind({ namespace: 'dsh-omp-advisor' })
-
   return function OmpAdvisorSettingsSection() {
-    const snapshot = useSyncExternalStore(
-      useCallback((cb: () => void) => scope.subscribe(cb), [scope]),
-      useCallback(() => scope.getSnapshot(), [scope])
-    )
-    const value = snapshot.value
+    const [view, setView] = useState<SnapshotView | null>(null)
+    const [phase, setPhase] = useState<'loading' | 'ready' | 'error'>('loading')
+    const [writeError, setWriteError] = useState<string | null>(null)
     const [catalog, setCatalog] = useState<ModelCatalog | null>(null)
     const [catalogError, setCatalogError] = useState<string | null>(null)
-    const [status, setStatus] = useState<SnapshotView | null>(null)
 
     useEffect(() => {
       let cancelled = false
@@ -171,10 +166,13 @@ export function createSettingsSection(ctx: ClientCtx): React.ComponentType<{ clo
           .then(result => {
             // rpc.call resolves to the RpcResult itself; unwrap {ok, value}.
             const value = unwrapRpcResult<SnapshotView>(result, 'advisor snapshot')
-            if (!cancelled) setStatus(value)
+            if (cancelled) return
+            setView(value)
+            setPhase('ready')
           })
           .catch(() => {
-            /* service not mounted yet */
+            // Keep the last good view; only flip to error before first success.
+            if (!cancelled) setPhase(current => (current === 'ready' ? current : 'error'))
           })
       }
       poll()
@@ -185,13 +183,20 @@ export function createSettingsSection(ctx: ClientCtx): React.ComponentType<{ clo
       }
     }, [])
 
-    const write = useCallback(
-      (field: string, next: unknown) => {
-        void scope.set(field, next)
-      },
-      [scope]
-    )
+    const write = useCallback((field: string, next: unknown) => {
+      setWriteError(null)
+      void ctx.connection.rpc
+        .call('/dsh-omp-advisor', 'update', { patch: { [field]: next } })
+        .then(result => {
+          const value = unwrapRpcResult<{ settings: SettingsView }>(result, 'advisor settings update')
+          setView(current => (current ? { ...current, settings: value.settings } : current))
+        })
+        .catch((err: unknown) => {
+          setWriteError(String(err instanceof Error ? err.message : err))
+        })
+    }, [])
 
+    const value = view?.settings
     const advisors = useMemo<AdvisorEntryView[]>(() => value?.advisors ?? [], [value])
 
     const updateAdvisor = useCallback(
@@ -231,16 +236,16 @@ export function createSettingsSection(ctx: ClientCtx): React.ComponentType<{ clo
       ])
     }, [advisors, catalog, write])
 
-    if (snapshot.status === 'loading') {
-      return <div style={styles.root}>Loading advisor settings…</div>
-    }
-    if (snapshot.status === 'unavailable' || !value) {
+    if (!value) {
+      if (phase === 'loading') {
+        return <div style={styles.root}>Loading advisor settings…</div>
+      }
       return (
         <div style={styles.root}>
           <div style={styles.card}>
             <strong>Advisor settings unavailable</strong>
             <span style={styles.hint}>
-              The dsh-omp-advisor host service is not mounted. Restart DSH after installing the plugin.
+              The dsh-omp-advisor host service is not reachable. Restart DSH after installing the plugin.
             </span>
           </div>
         </div>
@@ -251,6 +256,7 @@ export function createSettingsSection(ctx: ClientCtx): React.ComponentType<{ clo
 
     return (
       <div style={styles.root}>
+        {writeError && <div style={styles.hint}>Settings write failed: {writeError}</div>}
         <div style={styles.card}>
           <div style={styles.row}>
             <label style={styles.label}>
@@ -423,14 +429,14 @@ export function createSettingsSection(ctx: ClientCtx): React.ComponentType<{ clo
 
         <div style={styles.card}>
           <strong>Live status</strong>
-          {!status || !status.sessions || status.sessions.length === 0 ? (
+          {!view.sessions || view.sessions.length === 0 ? (
             <span style={styles.hint}>
               {value.enabled
                 ? 'No sessions with attached advisors yet. Start a session and advisors will attach.'
                 : 'Advisors are disabled.'}
             </span>
           ) : (
-            status.sessions.map(session => (
+            view.sessions.map(session => (
               <div key={session.sessionId} style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                 <span style={styles.hint}>session {session.sessionId}</span>
                 <div style={styles.row}>

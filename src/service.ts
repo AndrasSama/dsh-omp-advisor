@@ -29,7 +29,11 @@ export class AdvisorService extends Service {
 
   private runtimes = new Map<string, SessionAdvisorRuntime>()
   private settingsValue: AdvisorSettings
-  private settingsScope: { get(): unknown; watch(cb: (next: unknown, prev: unknown) => void): () => void }
+  private settingsScope: {
+    get(): unknown
+    watch(cb: (next: unknown, prev: unknown) => void): () => void
+    update(patch: unknown): unknown
+  }
 
   constructor(
     private readonly hostCtx: CordisContextLike,
@@ -81,6 +85,24 @@ export class AdvisorService extends Service {
 
   get settings(): AdvisorSettings {
     return this.settingsValue
+  }
+
+  /**
+   * Merge a partial settings patch through the Host settings domain
+   * (schema-resolved, validated, watchers notified — the same path the
+   * settings document uses everywhere else) and answer the resolved value.
+   * The settings section's write transport is the plugin's own RPC channel
+   * because DSH keeps `settingsScope` persistence loopback-only; validation
+   * failures surface as thrown errors the RPC layer folds into bad-request.
+   */
+  updateSettings(patch: unknown): AdvisorSettings {
+    if (typeof patch !== 'object' || patch === null || Array.isArray(patch)) {
+      throw new Error('settings patch must be a plain object')
+    }
+    this.settingsScope.update(patch)
+    const resolved = normalizeSettings(this.settingsScope.get())
+    this.settingsValue = resolved
+    return resolved
   }
 
   private attach(session: SessionLike): void {
