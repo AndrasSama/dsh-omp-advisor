@@ -146,7 +146,8 @@ export interface CordisContextLike {
     rpc: {
       handle(
         channel: string,
-        handler: (endpoint: string, payload: unknown, signal: AbortSignal) => Promise<unknown>
+        handler: (endpoint: string, payload: unknown, signal: AbortSignal) => Promise<unknown>,
+        options: { authority: 'trusted-host' | 'loopback' }
       ): () => void
     }
   }

@@ -5,11 +5,32 @@
  *   pause     {sessionId, advisor}    -> pause one advisor
  *   resume    {sessionId, advisor}    -> resume one advisor
  *   reviewNow {sessionId}             -> queue an immediate review pass
+ *
+ * Contract notes (dsh-client-connection, rc.8):
+ *  - `rpc.handle` REQUIRES the options argument; `authority` is read
+ *    unguarded, so omitting it crashes the plugin tree at boot.
+ *  - `authority: 'trusted-host'` accepts loopback plus the deployment's
+ *    `--trusted-host` authorities (same fence as `/api`), so the settings
+ *    section works from remote GUIs too. `'loopback'` would 403 them.
+ *  - Handlers return an RpcResult (`{ok:true,value}` / `{ok:false,error}`)
+ *    and never throw: a thrown error becomes an opaque HTTP 500.
  */
 import type { AdvisorService } from './service'
 import type { CordisContextLike } from './types'
 
 export const RPC_CHANNEL = '/dsh-omp-advisor'
+
+type RpcResultShape =
+  | { ok: true; value: unknown }
+  | { ok: false; error: { code: string; message: string; details: Record<string, unknown> } }
+
+function badRequest(message: string): RpcResultShape {
+  return { ok: false, error: { code: 'bad-request', message, details: { issues: [] } } }
+}
+
+function internal(message: string): RpcResultShape {
+  return { ok: false, error: { code: 'internal', message, details: {} } }
+}
 
 function record(value: unknown, label: string): Record<string, unknown> {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
@@ -26,30 +47,44 @@ function string(value: unknown, label: string): string {
 export function registerAdvisorRpc(ctx: CordisContextLike, service: AdvisorService): () => void {
   const connection = ctx.connection
   if (!connection) return () => {}
-  return connection.rpc.handle(RPC_CHANNEL, async (endpoint, rawPayload) => {
-    const payload = rawPayload === undefined || rawPayload === null ? {} : record(rawPayload, 'payload')
-    switch (endpoint) {
-      case 'snapshot': {
-        if (typeof payload.sessionId === 'string' && payload.sessionId) {
-          return service.snapshot(payload.sessionId)
+  return connection.rpc.handle(
+    RPC_CHANNEL,
+    async (endpoint, rawPayload, signal): Promise<RpcResultShape> => {
+      try {
+        if (signal?.aborted) {
+          return { ok: false, error: { code: 'cancelled', message: 'request cancelled', details: {} } }
         }
-        return {
-          sessions: service.activeSessions().map(sessionId => service.snapshot(sessionId)),
-          settings: service.settings
+        const payload = rawPayload === undefined || rawPayload === null ? {} : record(rawPayload, 'payload')
+        switch (endpoint) {
+          case 'snapshot': {
+            if (typeof payload.sessionId === 'string' && payload.sessionId) {
+              return { ok: true, value: service.snapshot(payload.sessionId) }
+            }
+            return {
+              ok: true,
+              value: {
+                sessions: service.activeSessions().map(sessionId => service.snapshot(sessionId)),
+                settings: service.settings
+              }
+            }
+          }
+          case 'pause':
+          case 'resume': {
+            const sessionId = string(payload.sessionId, 'payload.sessionId')
+            const advisor = string(payload.advisor, 'payload.advisor')
+            return { ok: true, value: { ok: service.setPaused(sessionId, advisor, endpoint === 'pause') } }
+          }
+          case 'reviewNow': {
+            const sessionId = string(payload.sessionId, 'payload.sessionId')
+            return { ok: true, value: { ok: service.reviewNow(sessionId) } }
+          }
+          default:
+            return badRequest(`unknown endpoint: ${endpoint}`)
         }
+      } catch (error) {
+        return internal(String(error instanceof Error ? error.message : error))
       }
-      case 'pause':
-      case 'resume': {
-        const sessionId = string(payload.sessionId, 'payload.sessionId')
-        const advisor = string(payload.advisor, 'payload.advisor')
-        return { ok: service.setPaused(sessionId, advisor, endpoint === 'pause') }
-      }
-      case 'reviewNow': {
-        const sessionId = string(payload.sessionId, 'payload.sessionId')
-        return { ok: service.reviewNow(sessionId) }
-      }
-      default:
-        throw new Error(`unknown endpoint: ${endpoint}`)
-    }
-  })
+    },
+    { authority: 'trusted-host' }
+  )
 }

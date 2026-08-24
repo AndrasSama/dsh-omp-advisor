@@ -4,7 +4,7 @@
  * status panel backed by the `/dsh-omp-advisor` RPC channel.
  */
 import * as React from 'react'
-import { fetchModelCatalog, type ModelCatalog } from './model-catalog'
+import { fetchModelCatalog, unwrapRpcResult, type ModelCatalog } from './model-catalog'
 
 const { useCallback, useEffect, useMemo, useState, useSyncExternalStore } = React
 
@@ -169,7 +169,9 @@ export function createSettingsSection(ctx: ClientCtx): React.ComponentType<{ clo
         ctx.connection.rpc
           .call('/dsh-omp-advisor', 'snapshot', {})
           .then(result => {
-            if (!cancelled) setStatus(result as SnapshotView)
+            // rpc.call resolves to the RpcResult itself; unwrap {ok, value}.
+            const value = unwrapRpcResult<SnapshotView>(result, 'advisor snapshot')
+            if (!cancelled) setStatus(value)
           })
           .catch(() => {
             /* service not mounted yet */

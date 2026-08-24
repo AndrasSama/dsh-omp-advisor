@@ -60,6 +60,7 @@ Advisor model calls go through `ctx.llm.stream` with the provider route + model 
 - Advisor output passes a quarantine before it can become context: requests for unavailable tools and output-only destructive directives (ported hazard patterns) are replaced with a sanitized error.
 - Advisories injected into the session are excluded from future advisor deltas (no feedback loops).
 - The plugin never cancels, blocks, or gates the primary agent.
+- The `/dsh-omp-advisor` status RPC registers with `authority: 'trusted-host'`: requests pass the same Host/Origin trust fence as `/api` (loopback, or a deployment's `--trusted-host` authorities), so the live status panel also works from remote GUIs. Handlers return `RpcResult` values and never throw.
 
 ## Development
 
