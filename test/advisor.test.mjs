@@ -11,6 +11,8 @@ import {
   renderDelta,
   resolveDeliveryChannel,
   executeAdvisorTool,
+  registerAdvisorRpc,
+  RPC_CHANNEL,
   DEFAULT_ADVISOR_TOOL_NAMES
 } from './.bundle.mjs'
 
@@ -401,4 +403,75 @@ test('advisor loop quarantines unsafe output before history', async () => {
     loop.review('## Update 1\n\n### User\nhello', { inProgress: false, signal: new AbortController().signal }),
     /Advisor response quarantined/
   )
+})
+
+/* ------------------------------ registerAdvisorRpc ------------------------------ */
+
+function stubService() {
+  return {
+    snapshot: sessionId => ({ sessionId, active: false, advisors: [], recentNotes: [] }),
+    activeSessions: () => ['s1'],
+    settings: { enabled: false },
+    setPaused: () => true,
+    reviewNow: () => true
+  }
+}
+
+function captureHandle() {
+  const captured = {}
+  const ctx = {
+    connection: {
+      rpc: {
+        handle: (channel, handler, options) => {
+          captured.channel = channel
+          captured.handler = handler
+          captured.options = options
+          return () => {}
+        }
+      }
+    }
+  }
+  return { ctx, captured }
+}
+
+test('rpc registration passes the required authority option', () => {
+  const { ctx, captured } = captureHandle()
+  registerAdvisorRpc(ctx, stubService())
+  assert.equal(captured.channel, RPC_CHANNEL)
+  assert.ok(captured.options, 'options argument is required by dsh-client-connection')
+  assert.equal(captured.options.authority, 'trusted-host')
+})
+
+test('rpc snapshot returns an RpcResult value, not a raw object', async () => {
+  const { ctx, captured } = captureHandle()
+  registerAdvisorRpc(ctx, stubService())
+  const signal = new AbortController().signal
+  const all = await captured.handler('snapshot', {}, signal)
+  assert.equal(all.ok, true)
+  assert.equal(all.value.sessions.length, 1)
+  assert.equal(all.value.sessions[0].sessionId, 's1')
+  const one = await captured.handler('snapshot', { sessionId: 's9' }, signal)
+  assert.equal(one.ok, true)
+  assert.equal(one.value.sessionId, 's9')
+})
+
+test('rpc unknown endpoint yields a bad-request RpcResult (no throw)', async () => {
+  const { ctx, captured } = captureHandle()
+  registerAdvisorRpc(ctx, stubService())
+  const result = await captured.handler('nope', {}, new AbortController().signal)
+  assert.equal(result.ok, false)
+  assert.equal(result.error.code, 'bad-request')
+})
+
+test('rpc invalid payload folds into an internal RpcResult (no throw)', async () => {
+  const { ctx, captured } = captureHandle()
+  registerAdvisorRpc(ctx, stubService())
+  const result = await captured.handler('pause', { sessionId: 's1' }, new AbortController().signal)
+  assert.equal(result.ok, false)
+  assert.equal(result.error.code, 'internal')
+})
+
+test('rpc registration is a no-op without a connection service', () => {
+  const dispose = registerAdvisorRpc({}, stubService())
+  assert.equal(typeof dispose, 'function')
 })
