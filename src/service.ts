@@ -5,6 +5,7 @@
  */
 import { Service } from '@deepseek-ai/cordis'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import { MemoryManager } from './memory/manager'
 import { registerAdvisorRpc } from './rpc'
 import { createRestorePoint, pruneRestorePoints } from './restore-points'
 import { SessionAdvisorRuntime } from './runtime'
@@ -60,6 +61,8 @@ export class AdvisorService extends Service {
   private restorePointCounts = new Map<string, number>()
   /** Service-wide activity ring for the monitor surfaces (bounded, in-memory). */
   private events: AdvisorEventEntry[] = []
+  /** Advisor memory engines (v0.7.0): probing, recall, write gate. */
+  private readonly memory: MemoryManager
   private settingsValue: AdvisorSettings
   private settingsScope: {
     get(): unknown
@@ -86,6 +89,18 @@ export class AdvisorService extends Service {
     }) as never
 
     this.settingsValue = normalizeSettings(this.settingsScope.get())
+
+    this.memory = new MemoryManager(
+      {
+        // Sanctioned optional cross-plugin lookup (never an inject entry):
+        // undefined when the provider plugin is absent.
+        getService: name => (typeof this.hostCtx.get === 'function' ? this.hostCtx.get(name) : undefined),
+        log: (message, meta) => hostCtx.logger?.debug?.(`${SERVICE_NAME}: ${message}`, meta ?? {}),
+        recordEvent: (kind, fields) => this.recordEvent(kind, fields)
+      },
+      this.settingsValue.memory
+    )
+    void this.memory.probeAll()
 
     hostCtx.on('session/created', (session: SessionLike) => {
       // Track identity for the monitor surfaces regardless of enablement: the
@@ -132,6 +147,8 @@ export class AdvisorService extends Service {
     this.settingsScope.watch((next: unknown) => {
       const value = normalizeSettings(next)
       this.settingsValue = value
+      this.memory.updateSettings(value.memory)
+      void this.memory.probeAll()
       if (!value.enabled) {
         for (const [id, runtime] of this.runtimes) {
           runtime.dispose()
@@ -333,7 +350,21 @@ export class AdvisorService extends Service {
           }),
         log: (message, meta) => ctx.logger?.debug?.(`${SERVICE_NAME}: ${message}`, meta ?? {}),
         recordEvent: (kind, advisor, detail) =>
-          this.recordEvent(kind, { advisor, sessionId: id, ...(detail ? { detail } : {}) })
+          this.recordEvent(kind, { advisor, sessionId: id, ...(detail ? { detail } : {}) }),
+        // Advisor memory (v0.7.0): recall rides the review, lessons ride the gate.
+        recallMemory: (_advisorName, engineIds, deltaText) =>
+          this.memory.recall({ cwd, engineIds, query: deltaText.slice(-4000) }),
+        onMemoryLesson: (advisorName, lesson) => {
+          const entry = this.settingsValue.advisors.find(advisor => advisor.name === advisorName)
+          void this.memory.store({
+            sessionId: id,
+            cwd,
+            advisor: advisorName,
+            text: lesson.text,
+            tags: lesson.tags,
+            engineIds: entry?.memoryEngines
+          })
+        }
       },
       this.scopedSettings(this.settingsValue, cwd),
       (text: string) =>
@@ -343,6 +374,7 @@ export class AdvisorService extends Service {
         })
     )
     this.runtimes.set(id, runtime)
+    void this.memory.loadPending(cwd)
     this.recordEvent('attach', { sessionId: id, detail: cwd })
   }
 
@@ -422,5 +454,28 @@ export class AdvisorService extends Service {
     if (!runtime) return false
     runtime.enqueueReview(false)
     return true
+  }
+
+  /* --------------------------- advisor memory (v0.7.0) -------------------------- */
+
+  /** Memory engine statuses + gate + pending writes (monitor surfaces). */
+  memoryView(): ReturnType<MemoryManager['view']> {
+    return this.memory.view()
+  }
+
+  /** Re-probe every configured memory engine (Memory tab Rescan). */
+  async memoryRescan(): Promise<ReturnType<MemoryManager['view']>> {
+    await this.memory.probeAll()
+    return this.memory.view()
+  }
+
+  /** Approve one pending memory write (write gate = approval). */
+  async memoryApprove(writeId: string): Promise<{ ok: boolean; detail?: string }> {
+    return this.memory.approve(writeId)
+  }
+
+  /** Discard one pending memory write. */
+  async memoryDiscard(writeId: string): Promise<{ ok: boolean }> {
+    return this.memory.discard(writeId)
   }
 }

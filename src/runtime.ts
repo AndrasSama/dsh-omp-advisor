@@ -90,6 +90,13 @@ export interface SessionRuntimeHost {
   log?(message: string, meta?: Record<string, unknown>): void
   /** Activity-ring hook (monitor surfaces); sessionId is added by the service. */
   recordEvent?(kind: string, advisor?: string, detail?: string): void
+  /**
+   * Recall long-term memory for one review (v0.7.0). Returns the rendered
+   * `<recalled-memory>` block or '' — best-effort, never throws into reviews.
+   */
+  recallMemory?(advisorName: string, engineIds: string[] | undefined, deltaText: string): Promise<string>
+  /** Route one durable lesson emitted by an advisor through the write gate. */
+  onMemoryLesson?(advisorName: string, lesson: { text: string; tags: string[] }): void
 }
 
 export class SessionAdvisorRuntime {
@@ -136,6 +143,7 @@ export class SessionAdvisorRuntime {
     this.autoRetryMax = Math.min(999, Math.max(0, Math.round(maxRaw)))
     this.interveneOnBlocker = settings.interveneOnBlocker === true
     this.minDeltaChars = Math.min(100000, Math.max(0, Math.round(settings.minDeltaChars || 0)))
+    const memoryEnabled = settings.memory?.enabled !== false
     const next = new Map<string, AdvisorSlot>()
     for (const entry of settings.advisors) {
       const key = entry.name
@@ -146,7 +154,8 @@ export class SessionAdvisorRuntime {
         existing.loop.updateHostFlags({
           sessionId: this.host.sessionId,
           restorePointsEnabled: settings.restorePoints === true,
-          completionGate: settings.completionGate !== false
+          completionGate: settings.completionGate !== false,
+          memoryEnabled
         })
         if (existing.status === 'halted' || existing.status === 'error') {
           // Settings changed: give the advisor a fresh chance.
@@ -171,7 +180,9 @@ export class SessionAdvisorRuntime {
             sessionId: this.host.sessionId,
             restorePointsEnabled: settings.restorePoints === true,
             completionGate: settings.completionGate !== false,
+            memoryEnabled,
             onAdvice: (note, severity, advisorName, meta) => this.deliver(note, severity, advisorName, meta),
+            onMemoryLesson: (lesson, advisorName) => this.host.onMemoryLesson?.(advisorName, lesson),
             log: this.host.log
           },
           entry
@@ -263,7 +274,26 @@ export class SessionAdvisorRuntime {
         const controller = new AbortController()
         const startedAt = Date.now()
         try {
-          await slot.loop.review(text, { inProgress: item.inProgress, signal: controller.signal })
+          // Best-effort recall (v0.7.0): a failed recall degrades to a
+          // memory-less review, never a failed review.
+          let memoryContext: string | undefined
+          if (this.host.recallMemory) {
+            try {
+              const recalled = await this.host.recallMemory(slot.entry.name, slot.entry.memoryEngines, text)
+              if (recalled) memoryContext = recalled
+            } catch (error) {
+              this.host.log?.('memory recall skipped', {
+                session: this.host.sessionId,
+                advisor: slot.entry.name,
+                error: String(error instanceof Error ? error.message : error)
+              })
+            }
+          }
+          await slot.loop.review(text, {
+            inProgress: item.inProgress,
+            signal: controller.signal,
+            ...(memoryContext ? { memoryContext } : {})
+          })
           slot.updateIndex++
           slot.reviewsCompleted++
           slot.consecutiveFailures = 0

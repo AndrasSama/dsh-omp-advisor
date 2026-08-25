@@ -44,7 +44,8 @@ primary agent ──► session log ──► delta renderer ──► advisor m
 - **Completion gate (on by default, prompt-only).** When the watched agent moves to finish ("done", "all tests pass", goal completion), the advisor verifies the original ask is actually implemented — against the workspace and, when restore points exist, the session's baseline→now diff. If not, it instructs the agent to **report honestly what was done and what wasn't, and ask you whether the partial state is acceptable**. Once the work is verified complete — or you explicitly accept the compromise — the advisor's `acceptance` advisory reminds the agent to **commit the accepted state to the branch it is working on** (the plugin marks the latest restore point accepted; the agent runs the commit).
 - **Tiny-delta skip (optional).** With **Skip tiny deltas** set, transcript updates smaller than the threshold are skipped without calling the advisor model — a cheap way to cut advisor traffic on chatty sessions (skipped deltas are not replayed later).
 - **Containment (ported).** Output quarantine (unavailable-tool requests, output-only destructive directives), 3-consecutive-failure backlog drop, permanent-error halt until settings change, quota/rate-limit cooldown pause. The advisor **never blocks the primary agent** — a deliberate, safer deviation from oh-my-pi's catch-up wait.
-- **Multi-tab settings UI.** The settings section is organized like the Plugin Market's inner tab bar: **General** (policy switches), **Advisors** (the roster — cards collapsed by default, click a header to expand), **Workspaces** (a workspace × advisor activation matrix over the same `workspaces` field), and **Monitor** (live status + activity feed).
+- **Multi-tab settings UI.** The settings section is organized like the Plugin Market's inner tab bar: **General** (policy switches), **Advisors** (the roster — cards collapsed by default, click a header to expand), **Workspaces** (a workspace × advisor activation matrix over the same `workspaces` field), **Memory** (persistent advisor memory — pluggable engines, write gate, per-advisor engine toggles), and **Monitor** (live status + activity feed).
+- **Advisor memory (v0.7.0).** Advisors recall relevant long-term lessons into each review and write durable lessons back, through a pluggable engine roster: a built-in per-workspace plaintext store (default), OpenViking, Hindsight, MisakaNet, mem0, and any custom MCP memory server. Multiple engines run at once, each advisor picks its own, unavailable engines are grayed out and never block a review, and a write gate (approval / auto / read-only) controls what gets stored.
 - **Optional sidebar monitor tab.** When [dsh-better-sidebar](https://github.com/omdsh-dev/DSH-better-sidebar) is installed, the plugin registers an **Advisors** tab in the sidebar workbench: a **workspace-scoped** monitor: the tab follows the sidebar's session scope, so it shows this session's name and workspace, its attached advisors (status dot, review/advice counters, last error) and its activity feed — other sessions stay collapsed under "Other sessions", and the tab-strip badge counts only this session's advisors (`!` when one is halted/errored, hidden when none are attached here). Detection is a bounded runtime probe — **never a hard dependency**: without the sidebar the plugin loads and behaves exactly as before.
 
 ## Install
@@ -127,7 +128,7 @@ in the dsh-omp-advisor settings namespace and is edited through the GUI section.
 
 ## Configure
 
-Open **Settings → Ward Council**. The section has four inner tabs — **General**, **Advisors**, **Workspaces**, **Monitor** — patterned after the Plugin Market's sub-tab bar.
+Open **Settings → Ward Council**. The section has five inner tabs — **General**, **Advisors**, **Workspaces**, **Memory**, **Monitor** — patterned after the Plugin Market's sub-tab bar.
 
 **General tab:**
 
@@ -151,11 +152,31 @@ Open **Settings → Ward Council**. The section has four inner tabs — **Genera
   - **workspaces** — comma-separated patterns matched against the session's workspace path; the advisor only runs in matching sessions (empty = every session). Plain patterns are SUBSTRING matches — `/home/sama` also matches `/home/sama/anything` — so for broad paths prefix with `=` for an exact cwd match (`=/home/sama`). This is how you give the writing bench to your novel workspace and the engineering bench to your code workspace.
   - **skills** — the advisor's curated skill chips: remove one (`×`), add any packaged skill from the catalog dropdown, or **reset to preset defaults** if the advisor was created from a preset (see [Skills](#skills)),
   - **skill delivery** — `inject` (default: full skill bodies in the system prompt) or `lazy` (id+description index plus a `load_skill` tool — saves tokens, costs one extra call per loaded skill),
+  - **memory engines** — which long-term memory engines this advisor recalls from and writes to (see the **Memory** tab). None checked = the built-in plaintext store only; unavailable engines are grayed out here too,
   - per-advisor enable toggle.
 
 **Workspaces tab:**
 
 - A **workspace × advisor matrix**: rows are known workspaces (every workspace open in a session plus every pattern already configured), columns are advisors. A checked cell means that workspace pattern is in the advisor's list; toggling rewrites the same `workspaces` field the card editor uses. An advisor with no patterns runs everywhere — its cells render indeterminate, and checking one scopes it to that single workspace. A free-text row lets you add a workspace pattern that no session has opened yet.
+
+**Memory tab (v0.7.0):**
+
+Advisors get persistent, workspace-scoped memory: before each review they **recall** relevant lessons into their context, and after a review they may **write** a durable lesson back. Multiple engines can run at once, and each advisor picks its own engines on its card.
+
+- **Enable advisor memory** — master switch (on by default). When off, no recall runs and nothing is stored.
+- **Write gate** — who may store lessons:
+  - **Approval** (default) — advisor-proposed lessons queue as *pending* and are stored only when you approve them in the **Pending lessons** list (or the Monitor tab).
+  - **Auto** — lessons store immediately.
+  - **Read-only** — recall only, never write.
+- **Recall budget** — max items per engine (1–10, default 3) and total characters per review (500–40000, default 6000). Recalled items are merged through a single pack layer: per-engine cap, cross-engine dedup, score-ordered, budget-truncated — and injected as the *last* prompt block so prompt-prefix caching stays stable.
+- **Memory engines** — the engine roster with live probe status (green = available, yellow = needs setup, gray = unavailable). Unavailable engines are grayed out and skipped at runtime; they never block a review. **Rescan** re-probes on demand. Engines:
+  - **Plaintext MD (built-in)** — the default. One append-only markdown lesson file per workspace at `<workspace>/.dsh-omp-advisor/lessons.md`, recalled with a deterministic BM25-lite keyword search. Zero LLM calls, zero dependencies, human-editable.
+  - **OpenViking** — recall through the isolated `openvikingMemory` host service when the [OpenViking memory plugin](https://www.npmjs.com/package/@openviking/dsh-memory-plugin) is installed (recall-only preset; add it as a custom MCP engine for store support).
+  - **Hindsight** — point it at a Hindsight MCP endpoint (url or command) to recall/search knowledge pages and ingest lessons.
+  - **MisakaNet** — read-only failure-lesson network (verified debugging lessons); probed via its local MCP adapter when present.
+  - **mem0** — self-hosted mem0 MCP server (ships disabled; fill the endpoint and enable).
+- **Add custom MCP engine** — point the advisor at *any* MCP memory server (mem0, Graphiti, Cognee, a private store…). Provide an id, transport (stdio command/args/cwd or HTTP url), the recall/store tool names, and a read-only flag. This is the catch-all for frameworks without a dedicated preset.
+- **Pending lessons** — when the write gate is Approval, advisor-proposed lessons wait here with their tags and target engines; **Approve** stores them, **Discard** drops them. Pending writes persist per workspace and survive restarts.
 
 **Monitor tab:**
 
@@ -224,7 +245,7 @@ The plugin packages **250 advisor skills** under [`skills/<id>/SKILL.md`](./skil
 ```bash
 npm install        # dev deps only; DSH packages are runtime-provided
 npm run build      # gen-skills + host ESM (lib/index.js) + client CJS ModuleLoader bundle (lib/client.js)
-npm test           # 105 unit tests over the ported semantics
+npm test           # 123 unit tests over the ported semantics + memory
 npm run typecheck  # tsc --noEmit (DSH packages shimmed)
 ```
 
@@ -248,5 +269,5 @@ The optional sidebar monitor tab integrates with [omdsh-dev/DSH-better-sidebar](
 - No mutating-tool grants for advisors yet (oh-my-pi's WATCHDOG.yml roster). Blocker intervention (opt-in step cancellation) is the first intervention layer; full WATCHDOG grants remain targeted for a later release behind the DSH approval flow.
 - No in-session "advisors watching" badge yet; health is visible in the settings Monitor tab and — with dsh-better-sidebar installed — in the sidebar Advisors tab (status badge included).
 - Status panel polls every 5 s while the settings section is open (sidebar tab: 2 s while registered); no push yet. The activity ring is in-memory only (≤100 events, lost on restart) — monitoring, not audit.
-- **Next up (v0.7.0): advisor memory.** Ecosystem research (deepseek-harness Discussions + the plugin directory) shows memory is a top community demand yet every memory plugin serves the primary agent — no reviewer/advisor model has persistent memory. Planned: per-workspace lesson store (plain markdown/JSONL), deterministic zero-LLM recall + bounded injection into advisor prompts, composing with restore points (rewind lessons) and the completion gate (compromise records), with a user setting choosing the write gate: approval-staged (default) / auto-with-quarantine / read-only. **Optional backend:** when [OpenViking](https://github.com/volcengine/OpenViking) memory is installed (`@openviking/dsh-memory-plugin`), advisors will be able to recall/store lessons through it as an optional add-on — same runtime-probe pattern as the better-sidebar tab, never a hard dependency, cited here and in the attribution.
+- **Advisor memory shipped in v0.7.0** (see the **Memory tab** above): per-workspace plaintext lesson store with deterministic zero-LLM recall, a pluggable engine roster (OpenViking / Hindsight / MisakaNet / mem0 / any custom MCP server), per-advisor engine toggles, and an approval / auto / read-only write gate. Still ahead: composing memory with restore points (rewind lessons) and the completion gate (compromise records), MCP connection pooling, a dedicated memory browser, and per-engine write confirmations.
 - Web profile UI; other profiles can still configure the namespace by hand.

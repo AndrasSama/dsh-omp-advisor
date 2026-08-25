@@ -33,6 +33,7 @@ import systemPrompt from './prompts/system.md'
 import adviseToolPrompt from './prompts/advise-tool.md'
 import completionGatePrompt from './prompts/completion-gate.md'
 import contextFilesTemplate from './prompts/context-files.md'
+import memoryPrompt from './prompts/memory.md'
 import { PACKAGED_SKILLS } from './skills.generated'
 
 /** Soft character budget for the advisor's own conversation before a reset. */
@@ -50,8 +51,12 @@ export interface AdvisorLoopHost {
   restorePointsEnabled?: boolean
   /** Include the completion-gate protocol in the system prompt. */
   completionGate?: boolean
+  /** Include the memory protocol (recall usage + lesson extraction). */
+  memoryEnabled?: boolean
   /** Called for every accepted advice note. */
   onAdvice(note: string, severity: AdvisorSeverity | undefined, advisorName: string, meta?: AdviceMeta): void
+  /** Called when a review emits a durable lesson (v0.7.0 memory). */
+  onMemoryLesson?(lesson: { text: string; tags: string[] }, advisorName: string): void
   log?(message: string, meta?: Record<string, unknown>): void
 }
 
@@ -110,6 +115,26 @@ function renderContextFiles(files: { path: string; content: string }[]): string 
   return contextFilesTemplate.replace('{{#each contextFiles}}', '').replace('{{/each}}', body)
 }
 
+/** Extract the first durable-lesson block from accepted assistant output. */
+const MEMORY_LESSON_RE = /<advisor-memory(?:\s+tags="([^"]*)")?\s*>([\s\S]*?)<\/advisor-memory>/
+
+export function extractMemoryLesson(blocks: LlmContentBlock[]): { text: string; tags: string[] } | undefined {
+  for (const block of blocks) {
+    if (block.type !== 'text') continue
+    const match = MEMORY_LESSON_RE.exec(block.text)
+    if (!match) continue
+    const text = match[2].trim()
+    if (!text) continue
+    const tags = (match[1] ?? '')
+      .split(',')
+      .map(tag => tag.trim())
+      .filter(Boolean)
+      .slice(0, 8)
+    return { text: text.slice(0, 2000), tags }
+  }
+  return undefined
+}
+
 /** Assemble one advisor turn from the stream, collecting finished blocks. */
 async function collectStream(stream: AsyncIterable<LlmStreamChunk>): Promise<{
   blocks: LlmContentBlock[]
@@ -156,7 +181,9 @@ export class AdvisorLoop {
   }
 
   /** Refresh host flags that settings changes may invalidate (restore points, completion gate). */
-  updateHostFlags(flags: Partial<Pick<AdvisorLoopHost, 'sessionId' | 'restorePointsEnabled' | 'completionGate'>>): void {
+  updateHostFlags(
+    flags: Partial<Pick<AdvisorLoopHost, 'sessionId' | 'restorePointsEnabled' | 'completionGate' | 'memoryEnabled'>>
+  ): void {
     Object.assign(this.host, flags)
   }
 
@@ -194,6 +221,7 @@ export class AdvisorLoop {
     if (this.contextFilesText) parts.push(this.contextFilesText)
     parts.push(`Tool reference for \`advise\`:\n${adviseToolPrompt.trim()}`)
     if (this.host.completionGate !== false) parts.push(completionGatePrompt.trim())
+    if (this.host.memoryEnabled === true) parts.push(memoryPrompt.trim())
     if (this.entry.instructions?.trim()) {
       parts.push(`<specialization>\n${this.entry.instructions.trim()}\n</specialization>`)
     }
@@ -216,9 +244,16 @@ export class AdvisorLoop {
    * Review one transcript delta. Runs the tool loop until the advisor calls
    * `advise`, stops calling tools, or exhausts `maxTurns`.
    *
+   * `opts.memoryContext` (v0.7.0) is the recalled-memory block rendered by
+   * the memory manager; it rides AFTER the delta text so the static prompt
+   * prefix stays cache-stable. Retries re-review the bare delta (no recall).
+   *
    * @returns true when the turn completed (even silently); throws on model failure.
    */
-  async review(deltaText: string, opts: { inProgress: boolean; signal: AbortSignal }): Promise<boolean> {
+  async review(
+    deltaText: string,
+    opts: { inProgress: boolean; signal: AbortSignal; memoryContext?: string }
+  ): Promise<boolean> {
     if (!this.contextFilesLoaded) {
       this.contextFilesLoaded = true
       this.contextFilesText = renderContextFiles(await loadContextFiles(this.host.cwd))
@@ -227,8 +262,9 @@ export class AdvisorLoop {
     this.maybeResetForContext()
     this.gate.beginUpdate(opts.inProgress)
 
-    this.messages.push(userMessage(deltaText))
-    this.trackSize(deltaText)
+    const fullDelta = opts.memoryContext ? `${deltaText}\n\n${opts.memoryContext}` : deltaText
+    this.messages.push(userMessage(fullDelta))
+    this.trackSize(fullDelta)
 
     const toolSchemas = [
       ...ADVISOR_TOOL_SCHEMAS,
@@ -239,6 +275,7 @@ export class AdvisorLoop {
 
     const maxTurns = Math.max(1, this.entry.maxTurns || 4)
     let advised = false
+    let lessonEmitted = false
 
     for (let turn = 0; turn < maxTurns; turn++) {
       if (opts.signal.aborted) return false
@@ -274,6 +311,16 @@ export class AdvisorLoop {
 
       this.messages.push(assistantMessage(blocks, this.entry.provider, this.entry.model))
       this.trackSize(JSON.stringify(blocks))
+
+      // Durable-lesson extraction (v0.7.0): at most one per review, only
+      // from quarantine-cleared output. The write gate decides what happens.
+      if (!lessonEmitted) {
+        const lesson = extractMemoryLesson(blocks)
+        if (lesson) {
+          lessonEmitted = true
+          this.host.onMemoryLesson?.(lesson, this.entry.name)
+        }
+      }
 
       const toolCalls = blocks.filter((b): b is Extract<LlmContentBlock, { type: 'tool-call' }> => b.type === 'tool-call')
       if (toolCalls.length === 0) return true // silent review or plain text: done

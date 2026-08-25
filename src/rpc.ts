@@ -6,6 +6,9 @@
  *   pause     {sessionId, advisor}    -> pause one advisor
  *   resume    {sessionId, advisor}    -> resume one advisor
  *   reviewNow {sessionId}             -> queue an immediate review pass
+ *   memoryRescan {}                   -> re-probe memory engines, return view
+ *   memoryApprove {writeId}           -> approve one pending memory write
+ *   memoryDiscard {writeId}           -> discard one pending memory write
  *
  * Contract notes (dsh-client-connection, rc.8):
  *  - `rpc.handle` REQUIRES the options argument; `authority` is read
@@ -76,7 +79,9 @@ export function registerAdvisorRpc(ctx: CordisContextLike, service: AdvisorServi
                 // Additive monitor fields (v0.6.0): workspace matrix rows and
                 // the activity ring. Older clients ignore them.
                 knownWorkspaces: service.knownWorkspaces(),
-                recentEvents: service.recentEvents()
+                recentEvents: service.recentEvents(),
+                // Additive v0.7.0: memory engine statuses + pending writes.
+                memory: service.memoryView()
               }
             }
           }
@@ -103,6 +108,16 @@ export function registerAdvisorRpc(ctx: CordisContextLike, service: AdvisorServi
           case 'reviewNow': {
             const sessionId = string(payload.sessionId, 'payload.sessionId')
             return { ok: true, value: { ok: service.reviewNow(sessionId) } }
+          }
+          case 'memoryRescan': {
+            return { ok: true, value: { memory: await service.memoryRescan() } }
+          }
+          case 'memoryApprove':
+          case 'memoryDiscard': {
+            const writeId = string(payload.writeId, 'payload.writeId')
+            const result =
+              endpoint === 'memoryApprove' ? await service.memoryApprove(writeId) : await service.memoryDiscard(writeId)
+            return { ok: true, value: result }
           }
           default:
             return badRequest(`unknown endpoint: ${endpoint}`)

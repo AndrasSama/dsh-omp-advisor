@@ -31,7 +31,21 @@ import {
   restoreInstructions,
   commitInstructions,
   mountAdvisorSidebarTab,
-  shiftExpandedAfterRemove
+  shiftExpandedAfterRemove,
+  normalizeMemorySettings,
+  PRESET_ENGINES,
+  BUILTIN_MD_ENGINE,
+  expandHome,
+  packMemoryItems,
+  normalizeItem,
+  renderMemoryBlock,
+  appendLesson,
+  parseLessons,
+  recallLessons,
+  renderLessonEntry,
+  tokenize,
+  extractMemoryLesson,
+  MemoryManager
 } from './.bundle.mjs'
 
 /* -------------------------------- AdviseGate -------------------------------- */
@@ -469,6 +483,10 @@ function stubService(overrides = {}) {
     updateSettings: patch => ({ enabled: true, ...patch }),
     knownWorkspaces: () => ['/home/u/alpha'],
     recentEvents: () => [{ time: 1, kind: 'attach', sessionId: 's1' }],
+    memoryView: () => ({ enabled: true, writeGate: 'approval', engines: [], pending: [] }),
+    memoryRescan: async () => ({ enabled: true, writeGate: 'approval', engines: [], pending: [] }),
+    memoryApprove: async () => ({ ok: true }),
+    memoryDiscard: async () => ({ ok: true }),
     ...overrides
   }
 }
@@ -2089,4 +2107,230 @@ test('advisorMatchesWorkspace: mixed lists keep substring default, "=" opt-in, w
   // Plain patterns stay substring (documented behavior preserved).
   const plain = { workspaces: ['Qwest Chain'] }
   assert.equal(advisorMatchesWorkspace(plain, '/mnt/work/Qwest Chain/sub/dir'), true)
+})
+
+/* ============================ v0.7.0 advisor memory ============================ */
+
+/* ------------------------- normalizeMemorySettings -------------------------- */
+
+test('normalizeMemorySettings: defaults seed presets, approval gate, clamped budgets', () => {
+  const value = normalizeMemorySettings(undefined)
+  assert.equal(value.enabled, true)
+  assert.equal(value.writeGate, 'approval')
+  assert.equal(value.recallMaxPerEngine, 3)
+  assert.equal(value.recallBudgetChars, 6000)
+  const ids = value.engines.map(engine => engine.id)
+  for (const preset of PRESET_ENGINES) assert.ok(ids.includes(preset.id), `preset ${preset.id} present`)
+  const builtin = value.engines.find(engine => engine.id === BUILTIN_MD_ENGINE)
+  assert.equal(builtin.kind, 'builtin-md')
+  assert.equal(builtin.enabled, true)
+})
+
+test('normalizeMemorySettings: user entries merge over presets by id and clamp bounds', () => {
+  const value = normalizeMemorySettings({
+    writeGate: 'auto',
+    recallMaxPerEngine: 99,
+    recallBudgetChars: 1,
+    engines: [
+      { id: 'openviking', enabled: false },
+      { id: 'my-custom', label: 'Custom', transport: 'http', url: 'http://x', tools: { recall: 'r' } }
+    ]
+  })
+  assert.equal(value.writeGate, 'auto')
+  assert.equal(value.recallMaxPerEngine, 10, 'clamped to max')
+  assert.equal(value.recallBudgetChars, 500, 'clamped to min')
+  const ov = value.engines.find(engine => engine.id === 'openviking')
+  assert.equal(ov.enabled, false, 'user override wins')
+  assert.equal(ov.builtin, true, 'preset identity preserved')
+  const custom = value.engines.find(engine => engine.id === 'my-custom')
+  assert.equal(custom.label, 'Custom')
+  assert.equal(custom.url, 'http://x')
+})
+
+test('normalizeMemorySettings: invalid writeGate falls back to approval; bad engines dropped', () => {
+  const value = normalizeMemorySettings({ writeGate: 'bogus', engines: [{ id: '' }, null, 42] })
+  assert.equal(value.writeGate, 'approval')
+  // Only presets survive; the three invalid entries are dropped.
+  assert.equal(value.engines.length, PRESET_ENGINES.length)
+})
+
+test('expandHome expands a leading ~ to HOME', () => {
+  const home = process.env.HOME
+  assert.equal(expandHome('~/x'), `${home}/x`)
+  assert.equal(expandHome('/abs/path'), '/abs/path')
+})
+
+/* ------------------------------ packMemoryItems ------------------------------ */
+
+test('packMemoryItems: per-engine cap, cross-engine dedup, budget, stable order', () => {
+  const items = [
+    { engineId: 'a', id: '1', score: 5, text: 'alpha lesson one' },
+    { engineId: 'a', id: '2', score: 4, text: 'alpha lesson two' },
+    { engineId: 'a', id: '3', score: 3, text: 'alpha lesson three' },
+    { engineId: 'b', id: '1', score: 6, text: 'beta top' },
+    // Near-duplicate of alpha lesson one (whitespace/case) from another engine.
+    { engineId: 'b', id: '2', score: 2, text: 'ALPHA   lesson ONE' }
+  ]
+  const packed = packMemoryItems(items, { perEngineCap: 2, budgetChars: 10000 })
+  const ids = packed.items.map(item => `${item.engineId}/${item.id}`)
+  assert.deepEqual(ids, ['b/1', 'a/1', 'a/2'], 'score desc, per-engine cap 2, dedup drops b/2')
+  assert.equal(packed.dropped, 2, 'a/3 over cap + b/2 duplicate')
+})
+
+test('packMemoryItems: total budget truncates lowest-value overflow', () => {
+  const items = [
+    { engineId: 'a', id: '1', score: 9, text: 'x'.repeat(100) },
+    { engineId: 'b', id: '1', score: 8, text: 'y'.repeat(100) },
+    { engineId: 'c', id: '1', score: 7, text: 'z'.repeat(100) }
+  ]
+  const packed = packMemoryItems(items, { perEngineCap: 5, budgetChars: 250 })
+  assert.equal(packed.items.length, 2, 'third item exceeds the 250-char budget')
+  assert.equal(packed.dropped, 1)
+})
+
+test('normalizeItem clips oversized text and requires text', () => {
+  assert.equal(normalizeItem('e', {}, 0), undefined)
+  const item = normalizeItem('e', { text: 'q'.repeat(5000), score: 1 }, 3)
+  assert.ok(item.text.length <= 1201)
+  assert.equal(item.id, 'e:3')
+})
+
+test('renderMemoryBlock: empty when nothing, tagged block otherwise', () => {
+  assert.equal(renderMemoryBlock({ items: [], dropped: 0 }), '')
+  const block = renderMemoryBlock({ items: [{ engineId: 'builtin-md', id: 'lesson-1', score: 1, text: 'Use X.' }], dropped: 0 })
+  assert.ok(block.startsWith('<recalled-memory'))
+  assert.ok(block.includes('[builtin-md/lesson-1] Use X.'))
+})
+
+/* --------------------------------- md-store --------------------------------- */
+
+test('md-store: render + parse round-trips entries with tags', () => {
+  const entry = renderLessonEntry({ text: 'Line one.\nLine two.', advisor: 'The Clarifier', tags: ['api', 'retry'] })
+  const parsed = parseLessons(entry)
+  assert.equal(parsed.length, 1)
+  assert.equal(parsed[0].advisor, 'The Clarifier')
+  assert.deepEqual(parsed[0].tags, ['api', 'retry'])
+  assert.ok(parsed[0].text.includes('Line one.'))
+})
+
+test('md-store: appendLesson writes then skips exact duplicates', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'omp-mem-'))
+  try {
+    const first = await appendLesson(dir, { text: 'Always retry on 429.', advisor: 'A', tags: ['retry'] })
+    assert.equal(first.appended, true)
+    const dup = await appendLesson(dir, { text: 'Always   retry on 429.', advisor: 'B', tags: [] })
+    assert.equal(dup.appended, false)
+    assert.equal(dup.reason, 'duplicate')
+    const empty = await appendLesson(dir, { text: '   ', advisor: 'A', tags: [] })
+    assert.equal(empty.appended, false)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('md-store: recallLessons is deterministic and keyword-driven', () => {
+  const entries = [
+    { time: 't1', advisor: 'A', tags: ['git'], text: 'git rebase interactive edits the todo list' },
+    { time: 't2', advisor: 'B', tags: [], text: 'the build uses pnpm workspaces' },
+    { time: 't3', advisor: 'C', tags: ['git'], text: 'git bisect finds the breaking commit' }
+  ]
+  const first = recallLessons(entries, 'git rebase', 3)
+  const second = recallLessons(entries, 'git rebase', 3)
+  assert.deepEqual(first, second, 'deterministic')
+  assert.ok(first.length >= 1)
+  assert.ok(first[0].text.includes('git'), 'top hit is git-related')
+  assert.equal(recallLessons(entries, '', 3).length, 0, 'empty query -> nothing')
+})
+
+test('md-store: tokenize lowercases and filters short tokens', () => {
+  assert.deepEqual(tokenize('Foo BAR bazzz qu'), ['foo', 'bar', 'bazzz'])
+})
+
+/* ----------------------------- extractMemoryLesson --------------------------- */
+
+test('extractMemoryLesson parses tags and body, ignores absent blocks', () => {
+  const blocks = [{ type: 'text', text: 'Advice here.\n<advisor-memory tags="api, retry">Retry on 429.</advisor-memory>' }]
+  const lesson = extractMemoryLesson(blocks)
+  assert.deepEqual(lesson.tags, ['api', 'retry'])
+  assert.equal(lesson.text, 'Retry on 429.')
+  assert.equal(extractMemoryLesson([{ type: 'text', text: 'no memory block' }]), undefined)
+  assert.equal(extractMemoryLesson([]), undefined)
+})
+
+/* ------------------------------- MemoryManager ------------------------------ */
+
+function memoryManagerHost(overrides = {}) {
+  const events = []
+  return {
+    events,
+    host: {
+      getService: () => undefined,
+      log: () => {},
+      recordEvent: (kind, fields) => events.push({ kind, ...fields }),
+      ...overrides
+    }
+  }
+}
+
+test('MemoryManager: readonly gate drops lessons, approval gate queues them', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'omp-mgr-'))
+  try {
+    const ro = new MemoryManager(memoryManagerHost().host, normalizeMemorySettings({ writeGate: 'readonly' }))
+    assert.equal(await ro.store({ sessionId: 's', cwd: dir, advisor: 'A', text: 'L', tags: [], engineIds: undefined }), 'dropped (read-only)')
+
+    const approving = new MemoryManager(memoryManagerHost().host, normalizeMemorySettings({ writeGate: 'approval' }))
+    const outcome = await approving.store({ sessionId: 's', cwd: dir, advisor: 'A', text: 'Lesson text', tags: ['x'], engineIds: undefined })
+    assert.equal(outcome, 'queued for approval')
+    assert.equal(approving.pendingWrites().length, 1)
+    // Approving writes to the builtin MD store.
+    const writeId = approving.pendingWrites()[0].id
+    const approved = await approving.approve(writeId)
+    assert.equal(approved.ok, true)
+    assert.equal(approving.pendingWrites().length, 0)
+    const { readFileSync } = await import('node:fs')
+    const content = readFileSync(join(dir, '.dsh-omp-advisor', 'lessons.md'), 'utf8')
+    assert.ok(content.includes('Lesson text'))
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('MemoryManager: auto gate writes immediately and records an event', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'omp-mgr-'))
+  try {
+    const { events, host } = memoryManagerHost()
+    const manager = new MemoryManager(host, normalizeMemorySettings({ writeGate: 'auto' }))
+    const outcome = await manager.store({ sessionId: 's', cwd: dir, advisor: 'A', text: 'Auto lesson', tags: [], engineIds: undefined })
+    assert.ok(outcome.startsWith('stored'))
+    assert.ok(events.some(event => event.kind === 'memory-write'))
+    assert.equal(manager.pendingWrites().length, 0)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('MemoryManager: view exposes engines, gate, and pending list', () => {
+  const manager = new MemoryManager(memoryManagerHost().host, normalizeMemorySettings({}))
+  const view = manager.view()
+  assert.equal(view.writeGate, 'approval')
+  assert.ok(view.engines.length >= PRESET_ENGINES.length)
+  assert.deepEqual(view.pending, [])
+  const builtin = view.engines.find(engine => engine.id === BUILTIN_MD_ENGINE)
+  assert.equal(builtin.builtin, true)
+})
+
+test('MemoryManager.parseMcpRecallText handles arrays, wrapped lists, and raw text', () => {
+  const arr = MemoryManager.parseMcpRecallText('e', JSON.stringify([{ id: '1', text: 'one', score: 2 }]), 5)
+  assert.equal(arr.length, 1)
+  assert.equal(arr[0].text, 'one')
+  const wrapped = MemoryManager.parseMcpRecallText('e', JSON.stringify({ results: [{ title: 'T' }] }), 5)
+  assert.equal(wrapped[0].text, 'T')
+  const raw = MemoryManager.parseMcpRecallText('e', 'just plain text', 5)
+  assert.equal(raw.length, 1)
+  assert.equal(raw[0].text, 'just plain text')
+})
+
+test('MemoryManager: recall returns empty when memory disabled or no engines usable', async () => {
+  const manager = new MemoryManager(memoryManagerHost().host, normalizeMemorySettings({ enabled: false }))
+  assert.equal(await manager.recall({ cwd: '/tmp', engineIds: undefined, query: 'anything' }), '')
 })

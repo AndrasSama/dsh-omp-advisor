@@ -30,6 +30,8 @@ interface AdvisorEntryView {
   skillMode?: 'inject' | 'lazy'
   workspaces?: string[]
   preset?: string
+  /** Memory engine ids this advisor may use (v0.7.0); empty = builtin MD only. */
+  memoryEngines?: string[]
 }
 
 interface SettingsView {
@@ -47,6 +49,14 @@ interface SettingsView {
   completionGate: boolean
   minDeltaChars: number
   advisors: AdvisorEntryView[]
+  /** Advisor memory config (v0.7.0). */
+  memory?: {
+    enabled: boolean
+    writeGate: 'approval' | 'auto' | 'readonly'
+    engines: unknown[]
+    recallMaxPerEngine: number
+    recallBudgetChars: number
+  }
 }
 
 interface AdvisorStatusView {
@@ -66,6 +76,37 @@ interface EventEntryView {
   detail?: string
 }
 
+/** One memory engine's live status (v0.7.0). */
+interface MemoryEngineView {
+  id: string
+  label: string
+  kind: 'builtin-md' | 'mcp' | 'service'
+  builtin: boolean
+  readOnly: boolean
+  enabled: boolean
+  available: boolean
+  detail?: string
+}
+
+/** One advisor-proposed lesson awaiting approval. */
+interface PendingMemoryView {
+  id: string
+  time: number
+  sessionId: string
+  advisor: string
+  text: string
+  tags: string[]
+  engines: string[]
+}
+
+/** The `memory` block of the aggregate snapshot (v0.7.0). */
+interface MemoryView {
+  enabled: boolean
+  writeGate: 'approval' | 'auto' | 'readonly'
+  engines: MemoryEngineView[]
+  pending: PendingMemoryView[]
+}
+
 interface SnapshotView {
   sessions?: {
     sessionId: string
@@ -80,6 +121,8 @@ interface SnapshotView {
   /** Additive v0.6.0 monitor fields — optional: an older host omits them. */
   knownWorkspaces?: string[]
   recentEvents?: EventEntryView[]
+  /** Additive v0.7.0 memory fields — optional: an older host omits them. */
+  memory?: MemoryView
 }
 
 interface ClientCtx {
@@ -266,6 +309,8 @@ interface AdvisorCardProps {
   index: number
   catalog: ModelCatalog | null
   collapsed: boolean
+  /** Live memory engine statuses, for the per-advisor engine toggles (v0.7.0). */
+  memoryEngines: MemoryEngineView[]
   onToggleCollapse(index: number): void
   onPatch(index: number, patch: Partial<AdvisorEntryView>): void
   onRemove(index: number): void
@@ -276,6 +321,7 @@ const AdvisorCard = React.memo(function AdvisorCard({
   index,
   catalog,
   collapsed,
+  memoryEngines,
   onToggleCollapse,
   onPatch,
   onRemove
@@ -465,6 +511,51 @@ const AdvisorCard = React.memo(function AdvisorCard({
               in matching sessions (empty = every session). A pattern is a SUBSTRING match — '/home/sama'
               also matches '/home/sama/anything'. Prefix a pattern with '=' for an EXACT path match, e.g.
               '=/home/sama'. The Workspaces tab offers a per-workspace toggle matrix over the same field.
+            </span>
+          </div>
+          <div style={styles.row}>
+            <span style={{ ...styles.hint, minWidth: 150 }}>Memory engines</span>
+            {memoryEngines.length === 0 ? (
+              <span style={styles.hint}>No engines probed yet — see the Memory tab.</span>
+            ) : (
+              memoryEngines.map(engine => {
+                const selected = (entry.memoryEngines ?? []).includes(engine.id)
+                const dim = !engine.available
+                return (
+                  <label
+                    key={engine.id}
+                    style={{ opacity: dim ? 0.45 : 1 }}
+                    title={
+                      dim
+                        ? `Unavailable: ${engine.detail ?? 'probe failed'}`
+                        : selected
+                          ? `Uncheck to stop this advisor using ${engine.label}`
+                          : `Check to let this advisor use ${engine.label}`
+                    }
+                  >
+                    <input
+                      type="checkbox"
+                      checked={selected}
+                      disabled={dim}
+                      onChange={event => {
+                        const current = entry.memoryEngines ?? []
+                        const next = event.target.checked
+                          ? [...current, engine.id]
+                          : current.filter(id => id !== engine.id)
+                        onPatch(index, { memoryEngines: next })
+                      }}
+                    />{' '}
+                    {engine.label}
+                  </label>
+                )
+              })
+            )}
+          </div>
+          <div style={styles.row}>
+            <span style={{ ...styles.hint, minWidth: 150 }} />
+            <span style={styles.hint}>
+              Which long-term memory engines this advisor recalls from and writes to. None checked = the
+              built-in plaintext store only. Engines grayed here are unavailable (see the Memory tab).
             </span>
           </div>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
@@ -690,6 +781,354 @@ function WorkspacesMatrix({ advisors, knownWorkspaces, onPatchAdvisor }: Workspa
   )
 }
 
+/* -------------------------------- memory panel ------------------------------- */
+
+const ENGINE_KIND_LABEL: Record<MemoryEngineView['kind'], string> = {
+  'builtin-md': 'Built-in',
+  mcp: 'MCP',
+  service: 'Service'
+}
+
+interface MemoryPanelProps {
+  /** Live engine statuses + pending writes (from the snapshot). */
+  memory: MemoryView | undefined
+  /** The editable memory settings block (from the draft/settings view). */
+  settingsMemory: SettingsView['memory']
+  /** Write a whole-section patch (field is always 'memory' here). */
+  write(field: string, next: unknown): void
+  /** Trigger a host-side rescan; resolves with the fresh memory view. */
+  onRescan(): Promise<MemoryView | undefined>
+  onApprove(writeId: string): void
+  onDiscard(writeId: string): void
+}
+
+function MemoryPanel({ memory, settingsMemory, write, onRescan, onApprove, onDiscard }: MemoryPanelProps): React.ReactElement {
+  const [scanning, setScanning] = useState(false)
+  const [showAdd, setShowAdd] = useState(false)
+  // Custom MCP engine form state.
+  const [form, setForm] = useState({
+    id: '',
+    label: '',
+    transport: 'stdio' as 'stdio' | 'http',
+    command: '',
+    args: '',
+    cwd: '',
+    url: '',
+    recallTool: 'search',
+    storeTool: 'add',
+    readOnly: false
+  })
+
+  const enabled = settingsMemory?.enabled !== false
+  const writeGate = settingsMemory?.writeGate ?? 'approval'
+  const configuredEngines = Array.isArray(settingsMemory?.engines) ? (settingsMemory?.engines as Record<string, unknown>[]) : []
+  const liveEngines = memory?.engines ?? []
+
+  const patchMemory = (patch: Record<string, unknown>): void => {
+    write('memory', { ...(settingsMemory ?? {}), ...patch })
+  }
+
+  const upsertEngine = (id: string, fields: Record<string, unknown>): void => {
+    const current = [...configuredEngines]
+    const index = current.findIndex(entry => entry?.id === id)
+    if (index >= 0) current[index] = { ...current[index], ...fields }
+    else current.push({ id, ...fields })
+    patchMemory({ engines: current })
+  }
+
+  const removeEngine = (id: string): void => {
+    patchMemory({ engines: configuredEngines.filter(entry => entry?.id !== id) })
+  }
+
+  const addCustomEngine = (): void => {
+    const id = form.id.trim().toLowerCase().replace(/[^a-z0-9-_]+/g, '-').slice(0, 64)
+    if (!id) return
+    upsertEngine(id, {
+      id,
+      ...(form.label.trim() ? { label: form.label.trim() } : {}),
+      kind: 'mcp',
+      transport: form.transport,
+      ...(form.transport === 'stdio'
+        ? {
+            command: form.command.trim(),
+            args: form.args.split(',').map(part => part.trim()).filter(Boolean),
+            ...(form.cwd.trim() ? { cwd: form.cwd.trim() } : {})
+          }
+        : { url: form.url.trim() }),
+      tools: {
+        ...(form.recallTool.trim() ? { recall: form.recallTool.trim() } : {}),
+        ...(form.storeTool.trim() && !form.readOnly ? { store: form.storeTool.trim() } : {})
+      },
+      ...(form.readOnly ? { readOnly: true } : {}),
+      enabled: true
+    })
+    setShowAdd(false)
+    setForm({ id: '', label: '', transport: 'stdio', command: '', args: '', cwd: '', url: '', recallTool: 'search', storeTool: 'add', readOnly: false })
+  }
+
+  const rescan = (): void => {
+    setScanning(true)
+    onRescan().finally(() => setScanning(false))
+  }
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <div style={styles.card}>
+        <div style={styles.row}>
+          <strong>Advisor memory</strong>
+          <span style={styles.hint}>
+            Advisors recall lessons into reviews and write durable lessons back. Multiple engines can run at
+            once; each advisor picks its engines on its card (Advisors tab).
+          </span>
+        </div>
+        <div style={styles.row}>
+          <label>
+            <input
+              type="checkbox"
+              checked={enabled}
+              onChange={event => patchMemory({ enabled: event.target.checked })}
+            />{' '}
+            Enable advisor memory
+          </label>
+          <span style={styles.hint}>Master switch. When off, no recall runs and no lesson is stored.</span>
+        </div>
+        <div style={styles.row}>
+          <span style={styles.label}>Write gate</span>
+          {(
+            [
+              ['approval', 'Approval — queue lessons, approve in Monitor'],
+              ['auto', 'Auto — store lessons immediately'],
+              ['readonly', 'Read-only — recall only, never write']
+            ] as const
+          ).map(([gate, label]) => (
+            <label key={gate}>
+              <input
+                type="radio"
+                name="memory-write-gate"
+                checked={writeGate === gate}
+                onChange={() => patchMemory({ writeGate: gate })}
+              />{' '}
+              {label}
+            </label>
+          ))}
+        </div>
+        <div style={styles.row}>
+          <span style={styles.label}>Recall budget</span>
+          <span style={styles.hint}>max</span>
+          <input
+            type="number"
+            min={1}
+            max={10}
+            style={{ ...styles.input, width: 70 }}
+            value={settingsMemory?.recallMaxPerEngine ?? 3}
+            onChange={event => {
+              const parsed = Number.parseInt(event.target.value, 10)
+              if (Number.isFinite(parsed)) patchMemory({ recallMaxPerEngine: Math.min(10, Math.max(1, parsed)) })
+            }}
+          />
+          <span style={styles.hint}>items/engine,</span>
+          <input
+            type="number"
+            min={500}
+            max={40000}
+            step={500}
+            style={{ ...styles.input, width: 90 }}
+            value={settingsMemory?.recallBudgetChars ?? 6000}
+            onChange={event => {
+              const parsed = Number.parseInt(event.target.value, 10)
+              if (Number.isFinite(parsed)) patchMemory({ recallBudgetChars: Math.min(40000, Math.max(500, parsed)) })
+            }}
+          />
+          <span style={styles.hint}>chars total per review.</span>
+        </div>
+      </div>
+
+      <div style={styles.card}>
+        <div style={styles.row}>
+          <strong>Memory engines</strong>
+          <span style={styles.hint}>
+            Engines are probed on startup and on rescan. Unavailable engines are grayed out and skipped at
+            runtime — they never block reviews.
+          </span>
+          <span style={{ flex: 1 }} />
+          <button style={styles.button} onClick={rescan} disabled={scanning}>
+            {scanning ? 'Scanning…' : 'Rescan'}
+          </button>
+        </div>
+        {liveEngines.length === 0 ? (
+          <span style={styles.hint}>No engine status yet — rescan to probe.</span>
+        ) : (
+          liveEngines.map(engine => {
+            const dim = !engine.available
+            return (
+              <div key={engine.id} style={{ ...styles.row, opacity: dim ? 0.45 : 1 }}>
+                <span
+                  style={{
+                    width: 9,
+                    height: 9,
+                    borderRadius: 999,
+                    display: 'inline-block',
+                    background: engine.available ? '#4caf7d' : engine.detail?.startsWith('needs setup') || engine.detail?.startsWith('not probed') ? '#c9a227' : '#8a8a8a'
+                  }}
+                  title={engine.detail ?? ''}
+                />
+                <input
+                  type="checkbox"
+                  checked={engine.enabled}
+                  disabled={dim}
+                  title={dim ? `Unavailable: ${engine.detail ?? 'probe failed'}` : 'Enable this engine'}
+                  onChange={event => upsertEngine(engine.id, { enabled: event.target.checked })}
+                />
+                <strong>{engine.label}</strong>
+                <span style={styles.chip}>{ENGINE_KIND_LABEL[engine.kind]}</span>
+                {engine.readOnly && <span style={styles.chip}>read-only</span>}
+                {engine.builtin ? (
+                  <span style={styles.hint}>preset</span>
+                ) : (
+                  <button style={styles.dangerButton} onClick={() => removeEngine(engine.id)}>
+                    remove
+                  </button>
+                )}
+                <span style={{ flex: 1 }} />
+                <span style={styles.hint} title={engine.detail ?? ''}>
+                  {engine.available ? engine.detail ?? 'available' : engine.detail ?? 'unavailable'}
+                </span>
+              </div>
+            )
+          })
+        )}
+        <div style={styles.row}>
+          <button style={styles.button} onClick={() => setShowAdd(current => !current)}>
+            {showAdd ? '− Hide custom MCP form' : '+ Add custom MCP engine'}
+          </button>
+          <span style={styles.hint}>
+            Point the advisor at any MCP memory server (mem0, Graphiti, Cognee, a private store…).
+          </span>
+        </div>
+        {showAdd && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8, paddingLeft: 8 }}>
+            <div style={styles.row}>
+              <input
+                style={{ ...styles.input, width: 140 }}
+                placeholder="engine id (kebab)"
+                value={form.id}
+                onChange={event => setForm(current => ({ ...current, id: event.target.value }))}
+              />
+              <input
+                style={{ ...styles.input, width: 160 }}
+                placeholder="display label"
+                value={form.label}
+                onChange={event => setForm(current => ({ ...current, label: event.target.value }))}
+              />
+              <select
+                style={styles.select}
+                value={form.transport}
+                onChange={event => setForm(current => ({ ...current, transport: event.target.value === 'http' ? 'http' : 'stdio' }))}
+              >
+                <option value="stdio">stdio (spawn a command)</option>
+                <option value="http">HTTP (streamable URL)</option>
+              </select>
+            </div>
+            {form.transport === 'stdio' ? (
+              <div style={styles.row}>
+                <input
+                  style={{ ...styles.input, width: 140 }}
+                  placeholder="command (e.g. python3)"
+                  value={form.command}
+                  onChange={event => setForm(current => ({ ...current, command: event.target.value }))}
+                />
+                <input
+                  style={{ ...styles.input, flex: 1, minWidth: 180 }}
+                  placeholder="args, comma-separated (e.g. server.py, --port, 9000)"
+                  value={form.args}
+                  onChange={event => setForm(current => ({ ...current, args: event.target.value }))}
+                />
+                <input
+                  style={{ ...styles.input, width: 200 }}
+                  placeholder="cwd (optional, ~ ok)"
+                  value={form.cwd}
+                  onChange={event => setForm(current => ({ ...current, cwd: event.target.value }))}
+                />
+              </div>
+            ) : (
+              <input
+                style={{ ...styles.input, flex: 1 }}
+                placeholder="MCP server URL (e.g. http://127.0.0.1:8765/mcp)"
+                value={form.url}
+                onChange={event => setForm(current => ({ ...current, url: event.target.value }))}
+              />
+            )}
+            <div style={styles.row}>
+              <span style={styles.hint}>recall tool</span>
+              <input
+                style={{ ...styles.input, width: 160 }}
+                value={form.recallTool}
+                onChange={event => setForm(current => ({ ...current, recallTool: event.target.value }))}
+              />
+              <span style={styles.hint}>store tool</span>
+              <input
+                style={{ ...styles.input, width: 160 }}
+                value={form.storeTool}
+                disabled={form.readOnly}
+                onChange={event => setForm(current => ({ ...current, storeTool: event.target.value }))}
+              />
+              <label>
+                <input
+                  type="checkbox"
+                  checked={form.readOnly}
+                  onChange={event => setForm(current => ({ ...current, readOnly: event.target.checked }))}
+                />{' '}
+                read-only
+              </label>
+              <button style={styles.button} onClick={addCustomEngine} disabled={!form.id.trim()}>
+                Add engine
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div style={styles.card}>
+        <div style={styles.row}>
+          <strong>Pending lessons</strong>
+          <span style={styles.hint}>
+            {writeGate === 'approval'
+              ? 'Advisor-proposed lessons waiting for your approval.'
+              : writeGate === 'auto'
+                ? 'Write gate is Auto — lessons store immediately, nothing queues here.'
+                : 'Write gate is Read-only — lessons are never stored.'}
+          </span>
+        </div>
+        {(memory?.pending ?? []).length === 0 ? (
+          <span style={styles.hint}>No pending lessons.</span>
+        ) : (
+          (memory?.pending ?? []).map(write_ => (
+            <div key={write_.id} style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+              <div style={styles.row}>
+                <strong>{write_.advisor}</strong>
+                {write_.tags.map(tag => (
+                  <span key={tag} style={styles.chip}>
+                    {tag}
+                  </span>
+                ))}
+                <span style={styles.hint}>→ {write_.engines.join(', ') || 'no writable engine'}</span>
+                <span style={{ flex: 1 }} />
+                <button style={styles.button} onClick={() => onApprove(write_.id)}>
+                  Approve
+                </button>
+                <button style={styles.dangerButton} onClick={() => onDiscard(write_.id)}>
+                  Discard
+                </button>
+              </div>
+              <span style={{ ...styles.hint, whiteSpace: 'pre-wrap' }}>{write_.text}</span>
+            </div>
+          ))
+        )}
+      </div>
+    </div>
+  )
+}
+
 /* --------------------------------- event feed -------------------------------- */
 
 const EVENT_KIND_COLORS: Record<string, string> = {
@@ -704,7 +1143,10 @@ const EVENT_KIND_COLORS: Record<string, string> = {
   'continue-sent': '#c9a227',
   'backlog-dropped': '#e08a3c',
   attach: '#8a8a8a',
-  detach: '#8a8a8a'
+  detach: '#8a8a8a',
+  'memory-pending': '#9a7fd1',
+  'memory-write': '#4caf7d',
+  'memory-discard': '#8a8a8a'
 }
 
 function formatEventTime(time: number): string {
@@ -783,7 +1225,7 @@ export function createSettingsSection(ctx: ClientCtx): React.ComponentType<{ clo
     const [catalog, setCatalog] = useState<ModelCatalog | null>(null)
     const [catalogError, setCatalogError] = useState<string | null>(null)
     // Inner tab (market-style sub-tab bar). Component-local, default General.
-    const [tab, setTab] = useState<'general' | 'advisors' | 'workspaces' | 'monitor'>('general')
+    const [tab, setTab] = useState<'general' | 'advisors' | 'workspaces' | 'memory' | 'monitor'>('general')
     // Expanded advisor cards (collapsed by default); per dialog-open lifetime.
     const [expanded, setExpanded] = useState<Set<number>>(() => new Set())
 
@@ -1037,8 +1479,35 @@ export function createSettingsSection(ctx: ClientCtx): React.ComponentType<{ clo
       { id: 'general' as const, label: 'General' },
       { id: 'advisors' as const, label: `Advisors (${advisors.length})` },
       { id: 'workspaces' as const, label: 'Workspaces' },
+      { id: 'memory' as const, label: 'Memory' },
       { id: 'monitor' as const, label: 'Monitor' }
     ]
+
+    // Memory tab handlers (v0.7.0): rescan probes engines host-side; approve /
+    // discard route one pending lesson through the write gate.
+    const memoryRescan = useCallback(async (): Promise<MemoryView | undefined> => {
+      try {
+        const result = await ctx.connection.rpc.call('/dsh-omp-advisor', 'memoryRescan', {})
+        const value = unwrapRpcResult<{ memory?: MemoryView }>(result, 'memory rescan')
+        if (value?.memory) setView(current => (current ? { ...current, memory: value.memory } : current))
+        return value?.memory
+      } catch (err: unknown) {
+        setWriteError(String(err instanceof Error ? err.message : err))
+        return undefined
+      }
+    }, [])
+    const memoryApprove = useCallback((writeId: string): void => {
+      ctx.connection.rpc
+        .call('/dsh-omp-advisor', 'memoryApprove', { writeId })
+        .then(() => memoryRescan())
+        .catch((err: unknown) => setWriteError(String(err instanceof Error ? err.message : err)))
+    }, [])
+    const memoryDiscard = useCallback((writeId: string): void => {
+      ctx.connection.rpc
+        .call('/dsh-omp-advisor', 'memoryDiscard', { writeId })
+        .then(() => memoryRescan())
+        .catch((err: unknown) => setWriteError(String(err instanceof Error ? err.message : err)))
+    }, [])
 
     return (
       <div style={styles.root}>
@@ -1322,6 +1791,7 @@ export function createSettingsSection(ctx: ClientCtx): React.ComponentType<{ clo
               index={index}
               catalog={catalog}
               collapsed={!expanded.has(index)}
+              memoryEngines={view?.memory?.engines ?? []}
               onToggleCollapse={toggleCollapse}
               onPatch={updateAdvisor}
               onRemove={removeAdvisor}
@@ -1341,6 +1811,17 @@ export function createSettingsSection(ctx: ClientCtx): React.ComponentType<{ clo
             advisors={advisors}
             knownWorkspaces={view?.knownWorkspaces ?? []}
             onPatchAdvisor={updateAdvisor}
+          />
+        )}
+
+        {tab === 'memory' && (
+          <MemoryPanel
+            memory={view?.memory}
+            settingsMemory={value.memory}
+            write={write}
+            onRescan={memoryRescan}
+            onApprove={memoryApprove}
+            onDiscard={memoryDiscard}
           />
         )}
 
@@ -1395,6 +1876,35 @@ export function createSettingsSection(ctx: ClientCtx): React.ComponentType<{ clo
                   ))}
               </div>
             ))
+          )}
+          {(view?.memory?.engines ?? []).length > 0 && (
+            <div style={styles.row}>
+              <span style={styles.label}>Memory engines</span>
+              {(view?.memory?.engines ?? []).map(engine => (
+                <span
+                  key={engine.id}
+                  style={{ ...styles.chip, opacity: engine.available ? 1 : 0.5 }}
+                  title={engine.detail ?? ''}
+                >
+                  <span
+                    style={{
+                      width: 8,
+                      height: 8,
+                      borderRadius: 999,
+                      display: 'inline-block',
+                      background: engine.available ? '#4caf7d' : '#8a8a8a'
+                    }}
+                  />
+                  {engine.label}
+                  {engine.enabled ? '' : ' · off'}
+                </span>
+              ))}
+              {(view?.memory?.pending ?? []).length > 0 && (
+                <span style={{ ...styles.chip, borderColor: '#9a7fd1', color: '#9a7fd1' }}>
+                  {(view?.memory?.pending ?? []).length} lesson{(view?.memory?.pending ?? []).length === 1 ? '' : 's'} pending
+                </span>
+              )}
+            </div>
           )}
           <EventFeed events={view?.recentEvents ?? []} />
         </div>

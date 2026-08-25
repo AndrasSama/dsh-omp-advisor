@@ -62,6 +62,90 @@ export interface AdvisorEntry {
   workspaces?: string[]
   /** Per-advisor on/off toggle (default true). */
   enabled?: boolean
+  /**
+   * Memory engine ids this advisor may use (v0.7.0). Undefined = the built-in
+   * plaintext store only. Engines not in the list (or unavailable) are never
+   * queried for this advisor.
+   */
+  memoryEngines?: string[]
+}
+
+/* ------------------------------ advisor memory ----------------------------- */
+
+/** Who may write advisor lessons into memory engines. */
+export type MemoryWriteGate = 'approval' | 'auto' | 'readonly'
+
+/** MCP tool names an engine maps recall/store/forget/health onto. */
+export interface MemoryEngineTools {
+  recall?: string
+  store?: string
+  forget?: string
+  health?: string
+}
+
+/** One memory engine definition (preset or user-added custom MCP). */
+export interface MemoryEngineConfig {
+  /** Unique kebab id. */
+  id: string
+  label?: string
+  kind: 'builtin-md' | 'mcp' | 'service'
+  /** Preset engines cannot be deleted (only disabled). */
+  builtin?: boolean
+  transport?: 'stdio' | 'http'
+  command?: string
+  args?: string[]
+  cwd?: string
+  env?: Record<string, string>
+  url?: string
+  tools?: MemoryEngineTools
+  /** Engine supports recall but never stores (write gate skips it). */
+  readOnly?: boolean
+  /** Global on/off (default true). */
+  enabled?: boolean
+}
+
+/** The `memory` section of the settings namespace (v0.7.0). */
+export interface MemorySettings {
+  /** Master switch for advisor memory (default true). */
+  enabled: boolean
+  writeGate: MemoryWriteGate
+  /** User overrides + custom engines, merged over the presets by id. */
+  engines: MemoryEngineConfig[]
+  /** Max recalled items per engine per review. */
+  recallMaxPerEngine: number
+  /** Total recalled-characters budget per review. */
+  recallBudgetChars: number
+}
+
+/** One normalized recalled memory item (every adapter emits this shape). */
+export interface MemoryItem {
+  engineId: string
+  id: string
+  score: number
+  text: string
+}
+
+/** Live probe state of one engine for the monitor surfaces. */
+export interface MemoryEngineStatusView {
+  id: string
+  label: string
+  kind: MemoryEngineConfig['kind']
+  builtin: boolean
+  readOnly: boolean
+  enabled: boolean
+  available: boolean
+  detail?: string
+}
+
+/** One advisor-proposed lesson awaiting approval (write gate = approval). */
+export interface PendingMemoryWrite {
+  id: string
+  time: number
+  sessionId: string
+  advisor: string
+  text: string
+  tags: string[]
+  engines: string[]
 }
 
 /** Resolved `dsh-omp-advisor` settings namespace value. */
@@ -116,6 +200,8 @@ export interface AdvisorSettings {
    */
   minDeltaChars: number
   advisors: AdvisorEntry[]
+  /** Advisor memory configuration (v0.7.0). */
+  memory: MemorySettings
 }
 
 /* ------------------------------ advisor status ----------------------------- */

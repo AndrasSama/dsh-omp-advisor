@@ -5,6 +5,7 @@
  * `ctx.llm.stream` calls.
  */
 import z from '@deepseek-ai/schemastery'
+import { normalizeMemorySettings } from './memory/engines'
 import type { AdvisorEntry, AdvisorSettings } from './types'
 
 export const SETTINGS_NAMESPACE = 'dsh-omp-advisor'
@@ -38,7 +39,13 @@ const advisorEntrySchema = z.object({
     .description(
       'Workspace scoping: substring patterns matched against the session cwd (e.g. "Qwest Chain"). Empty = advisor runs in every session.'
     ),
-  enabled: z.boolean().default(true).description('Per-advisor on/off toggle.')
+  enabled: z.boolean().default(true).description('Per-advisor on/off toggle.'),
+  memoryEngines: z
+    .array(z.string())
+    .default([])
+    .description(
+      'Memory engine ids this advisor may use (see the Memory tab). Empty = the built-in plaintext store only.'
+    )
 })
 
 export const advisorSettingsSchema = z.object({
@@ -117,7 +124,13 @@ export const advisorSettingsSchema = z.object({
     .description(
       'Skip advisor reviews whose rendered transcript delta is smaller than this many characters (0 = review everything). Skipped deltas are not replayed later.'
     ),
-  advisors: z.array(advisorEntrySchema).default([]).description('Advisor roster.')
+  advisors: z.array(advisorEntrySchema).default([]).description('Advisor roster.'),
+  memory: z
+    .any()
+    .default({})
+    .description(
+      'Advisor memory (v0.7.0): engine roster, write gate (approval/auto/readonly), and recall budgets. Normalized by the plugin; see the Memory tab.'
+    )
 })
 
 /** Clamp the advice coalesce window to the schema bounds (ms; 0 = off). */
@@ -208,6 +221,13 @@ export function normalizeSettings(raw: unknown): AdvisorSettings {
               .map(w => w.trim())
           }
         : {}),
+      ...(Array.isArray(entry.memoryEngines)
+        ? {
+            memoryEngines: entry.memoryEngines
+              .filter((e): e is string => typeof e === 'string' && e.trim() !== '')
+              .map(e => e.trim())
+          }
+        : {}),
       enabled: entry.enabled !== false
     })
   }
@@ -230,7 +250,8 @@ export function normalizeSettings(raw: unknown): AdvisorSettings {
     restorePointOnMutation: (value as { restorePointOnMutation?: unknown }).restorePointOnMutation !== false,
     completionGate: (value as { completionGate?: unknown }).completionGate !== false,
     minDeltaChars: coerceMinDeltaChars((value as { minDeltaChars?: unknown }).minDeltaChars),
-    advisors: deduped
+    advisors: deduped,
+    memory: normalizeMemorySettings((value as { memory?: unknown }).memory)
   }
 }
 
@@ -267,6 +288,9 @@ export function normalizeSettingsLenient(raw: unknown): AdvisorSettings {
       ...(Array.isArray(e.workspaces)
         ? { workspaces: e.workspaces.filter((w): w is string => typeof w === 'string') }
         : {}),
+      ...(Array.isArray(e.memoryEngines)
+        ? { memoryEngines: e.memoryEngines.filter((m): m is string => typeof m === 'string') }
+        : {}),
       enabled: e.enabled !== false
     })
   }
@@ -289,6 +313,7 @@ export function normalizeSettingsLenient(raw: unknown): AdvisorSettings {
     restorePointOnMutation: (value as { restorePointOnMutation?: unknown }).restorePointOnMutation !== false,
     completionGate: (value as { completionGate?: unknown }).completionGate !== false,
     minDeltaChars: coerceMinDeltaChars((value as { minDeltaChars?: unknown }).minDeltaChars),
-    advisors: preserved
+    advisors: preserved,
+    memory: normalizeMemorySettings((value as { memory?: unknown }).memory)
   }
 }
