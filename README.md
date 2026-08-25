@@ -171,11 +171,13 @@ Advisors get persistent, workspace-scoped memory: before each review they **reca
 - **Recall budget** — max items per engine (1–10, default 3) and total characters per review (500–40000, default 6000). Recalled items are merged through a single pack layer: per-engine cap, cross-engine dedup, score-ordered, budget-truncated — and injected as the *last* prompt block so prompt-prefix caching stays stable.
 - **Memory engines** — the engine roster with live probe status (green = available, yellow = needs setup, gray = unavailable). Unavailable engines are grayed out and skipped at runtime; they never block a review. **Rescan** re-probes on demand. Engines:
   - **Plaintext MD (built-in)** — the default. One append-only markdown lesson file per workspace at `<workspace>/.dsh-omp-advisor/lessons.md`, recalled with a deterministic BM25-lite keyword search. Zero LLM calls, zero dependencies, human-editable.
-  - **OpenViking** — recall through the isolated `openvikingMemory` host service when the [OpenViking memory plugin](https://www.npmjs.com/package/@openviking/dsh-memory-plugin) is installed (recall-only preset; add it as a custom MCP engine for store support).
-  - **Hindsight** — point it at a Hindsight MCP endpoint (url or command) to recall/search knowledge pages and ingest lessons.
-  - **MisakaNet** — read-only failure-lesson network (verified debugging lessons); probed via its local MCP adapter when present.
+  - **OpenViking** — drives the same stdio MCP proxy the [OpenViking memory plugin](https://www.npmjs.com/package/@openviking/dsh-memory-plugin) starts (`servers/mcp-proxy.mjs`, auto-resolved from the profile's node_modules). Recall via `find`, store via `remember` — so OpenViking lessons can be written too. (The plugin's `openvikingMemory` host service is isolate-scoped and not reachable across plugins, hence the proxy.)
+  - **Hindsight** — spawns Hindsight's bundled stdio MCP server (`dist/mcp-server.js`, auto-resolved) with `HINDSIGHT_MCP_HARNESS=dsh`; recall/search knowledge pages and ingest lessons.
+  - **MisakaNet** — read-only failure-lesson network (verified debugging lessons), probed via its local MCP adapter when present. Its raw MCP tools use dotted names (`deepseek.recovery.search`); DSH only rewrites dots→underscores when surfacing tools to agents, so the preset matches the dots.
   - **mem0** — self-hosted mem0 MCP server (ships disabled; fill the endpoint and enable).
 - **Add custom MCP engine** — point the advisor at *any* MCP memory server (mem0, Graphiti, Cognee, a private store…). Provide an id, transport (stdio command/args/cwd or HTTP url), the recall/store tool names, and a read-only flag. This is the catch-all for frameworks without a dedicated preset.
+- **Engine script auto-resolution** — builtin stdio presets that live in *another* package (OpenViking, Hindsight) use a `resolveScript` specifier resolved across the enclosing and profile node_modules at spawn time, so no profile-specific absolute path is hardcoded. If the package isn't installed the engine shows "not installed" and stays gray.
+- **Preset migration** — builtin engine definitions are versioned. When a release changes a preset (tool names, transport, spawn command), your persisted copy of the old preset is re-derived from the new one automatically (your enable/disable toggles carry over; custom engines are never touched).
 - **Pending lessons** — when the write gate is Approval, advisor-proposed lessons wait here with their tags and target engines; **Approve** stores them, **Discard** drops them. Pending writes persist per workspace and survive restarts.
 
 **Monitor tab:**
@@ -245,7 +247,7 @@ The plugin packages **250 advisor skills** under [`skills/<id>/SKILL.md`](./skil
 ```bash
 npm install        # dev deps only; DSH packages are runtime-provided
 npm run build      # gen-skills + host ESM (lib/index.js) + client CJS ModuleLoader bundle (lib/client.js)
-npm test           # 123 unit tests over the ported semantics + memory
+npm test           # 128 unit tests over the ported semantics + memory
 npm run typecheck  # tsc --noEmit (DSH packages shimmed)
 ```
 

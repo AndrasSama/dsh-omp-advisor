@@ -36,6 +36,9 @@ import {
   PRESET_ENGINES,
   BUILTIN_MD_ENGINE,
   expandHome,
+  resolvePackageScript,
+  resolveEngineSpawn,
+  MEMORY_PRESET_VERSION,
   packMemoryItems,
   normalizeItem,
   renderMemoryBlock,
@@ -2333,4 +2336,70 @@ test('MemoryManager.parseMcpRecallText handles arrays, wrapped lists, and raw te
 test('MemoryManager: recall returns empty when memory disabled or no engines usable', async () => {
   const manager = new MemoryManager(memoryManagerHost().host, normalizeMemorySettings({ enabled: false }))
   assert.equal(await manager.recall({ cwd: '/tmp', engineIds: undefined, query: 'anything' }), '')
+})
+
+/* --------------------- v0.7.2 preset migration + resolver ------------------- */
+
+test('presets: misakanet uses dotted tool names; openviking/hindsight are spawnable stdio', () => {
+  const misaka = PRESET_ENGINES.find(engine => engine.id === 'misakanet')
+  assert.equal(misaka.tools.recall, 'deepseek.recovery.search', 'dotted, not underscored')
+  assert.equal(misaka.tools.health, 'deepseek.recovery.status')
+  const ov = PRESET_ENGINES.find(engine => engine.id === 'openviking')
+  assert.equal(ov.kind, 'mcp')
+  assert.equal(ov.transport, 'stdio')
+  assert.ok(ov.resolveScript.includes('mcp-proxy.mjs'))
+  assert.equal(ov.readOnly, false, 'proxy exposes write tools')
+  const hs = PRESET_ENGINES.find(engine => engine.id === 'hindsight')
+  assert.equal(hs.transport, 'stdio')
+  assert.ok(hs.resolveScript.includes('mcp-server.js'))
+  assert.equal(hs.env.HINDSIGHT_MCP_HARNESS, 'dsh')
+})
+
+test('normalizeMemorySettings: stale persisted preset re-derives builtins, keeps enabled + custom', () => {
+  // Simulates a v0.7.0 install: no presetVersion, stale misakanet tool names,
+  // stale openviking service kind + readOnly, plus one custom engine.
+  const value = normalizeMemorySettings({
+    engines: [
+      { id: 'misakanet', tools: { recall: 'deepseek_recovery_search' }, enabled: true },
+      { id: 'openviking', kind: 'service', readOnly: true, enabled: false },
+      { id: 'my-custom', transport: 'http', url: 'http://x', tools: { recall: 'r' } }
+    ]
+  })
+  assert.equal(value.presetVersion, MEMORY_PRESET_VERSION)
+  const misaka = value.engines.find(engine => engine.id === 'misakanet')
+  assert.equal(misaka.tools.recall, 'deepseek.recovery.search', 'stale underscore name replaced')
+  const ov = value.engines.find(engine => engine.id === 'openviking')
+  assert.equal(ov.kind, 'mcp', 'stale service kind replaced by preset')
+  assert.equal(ov.readOnly, false, 'stale readOnly replaced by preset')
+  assert.equal(ov.enabled, false, 'user disable toggle survives migration')
+  const custom = value.engines.find(engine => engine.id === 'my-custom')
+  assert.equal(custom.url, 'http://x', 'custom engine untouched')
+})
+
+test('normalizeMemorySettings: current presetVersion respects user overrides', () => {
+  const value = normalizeMemorySettings({
+    presetVersion: MEMORY_PRESET_VERSION,
+    engines: [{ id: 'misakanet', tools: { recall: 'custom.recall' }, enabled: true }]
+  })
+  const misaka = value.engines.find(engine => engine.id === 'misakanet')
+  assert.equal(misaka.tools.recall, 'custom.recall', 'user override wins when version is current')
+})
+
+test('resolveEngineSpawn: node maps to execPath and resolveScript is prepended', () => {
+  const spawnInfo = resolveEngineSpawn({ id: 'x', kind: 'mcp', command: 'node', args: ['--flag'], resolveScript: 'nonexistent-pkg/script.js' })
+  assert.equal(spawnInfo.command, process.execPath)
+  assert.deepEqual(spawnInfo.args, ['--flag'], 'unresolvable script leaves args unchanged')
+  const plain = resolveEngineSpawn({ id: 'y', kind: 'mcp', command: 'python3', args: ['a.py'] })
+  assert.equal(plain.command, 'python3')
+  assert.deepEqual(plain.args, ['a.py'])
+})
+
+test('resolvePackageScript: finds real profile scripts or returns undefined cleanly', () => {
+  // These two ship in the web profile; when present they must resolve.
+  const ov = resolvePackageScript('@openviking/dsh-memory-plugin/servers/mcp-proxy.mjs')
+  const hs = resolvePackageScript('@vectorize-io/hindsight-coding-agents/dist/mcp-server.js')
+  if (ov !== undefined) assert.ok(ov.endsWith('mcp-proxy.mjs'))
+  if (hs !== undefined) assert.ok(hs.endsWith('mcp-server.js'))
+  assert.equal(resolvePackageScript('definitely-not-a-real-pkg/x.js'), undefined)
+  assert.equal(resolvePackageScript(''), undefined)
 })

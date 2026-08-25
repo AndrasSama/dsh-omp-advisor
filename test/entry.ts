@@ -16,7 +16,10 @@ export {
   normalizeMemorySettings,
   PRESET_ENGINES,
   BUILTIN_MD_ENGINE,
-  expandHome
+  expandHome,
+  resolvePackageScript,
+  resolveEngineSpawn,
+  MEMORY_PRESET_VERSION
 } from '../src/memory/engines'
 export { packMemoryItems, normalizeItem, renderMemoryBlock } from '../src/memory/pack'
 export {

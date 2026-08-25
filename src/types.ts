@@ -97,6 +97,14 @@ export interface MemoryEngineConfig {
   cwd?: string
   env?: Record<string, string>
   url?: string
+  /**
+   * A Node package-relative script specifier (e.g.
+   * '@openviking/dsh-memory-plugin/servers/mcp-proxy.mjs') resolved across
+   * known node_modules roots at spawn time and prepended to `args`. Lets
+   * builtin MCP presets launch servers that live in OTHER packages without
+   * hardcoding a profile-specific absolute path.
+   */
+  resolveScript?: string
   tools?: MemoryEngineTools
   /** Engine supports recall but never stores (write gate skips it). */
   readOnly?: boolean
@@ -115,6 +123,13 @@ export interface MemorySettings {
   recallMaxPerEngine: number
   /** Total recalled-characters budget per review. */
   recallBudgetChars: number
+  /**
+   * Schema version of the builtin presets. When the persisted value is older
+   * than the code's MEMORY_PRESET_VERSION, builtin engines are re-derived from
+   * the presets (carrying over only the user's `enabled` toggle) so stale
+   * persisted fields can't shadow an updated preset.
+   */
+  presetVersion?: number
 }
 
 /** One normalized recalled memory item (every adapter emits this shape). */

@@ -14,7 +14,7 @@ import type {
   MemorySettings,
   PendingMemoryWrite
 } from '../types'
-import { BUILTIN_MD_ENGINE, expandHome } from './engines'
+import { BUILTIN_MD_ENGINE, expandHome, resolvePackageScript } from './engines'
 import { appendLesson, MEMORY_DIR_NAME, recallFromWorkspace } from './md-store'
 import { getMcpSession, probeMcpEngine } from './mcp'
 import { packMemoryItems, renderMemoryBlock } from './pack'
@@ -80,6 +80,9 @@ export class MemoryManager {
     }
     if (engine.transport !== 'http' && !engine.command) {
       return { available: false, detail: 'needs setup: no command configured' }
+    }
+    if (engine.resolveScript && !resolvePackageScript(engine.resolveScript)) {
+      return { available: false, detail: `not installed: ${engine.resolveScript} not found` }
     }
     if (engine.cwd && !existsSync(expandHome(engine.cwd))) {
       return { available: false, detail: `not installed: ${engine.cwd} missing` }

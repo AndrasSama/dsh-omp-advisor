@@ -10,7 +10,7 @@
  */
 import { spawn, type ChildProcess } from 'node:child_process'
 import type { MemoryEngineConfig } from '../types'
-import { expandHome } from './engines'
+import { expandHome, resolveEngineSpawn } from './engines'
 
 export const MCP_PROBE_TIMEOUT_MS = 8000
 export const MCP_CALL_TIMEOUT_MS = 10000
@@ -45,7 +45,9 @@ function cacheKey(engine: MemoryEngineConfig): string {
     command: engine.command,
     args: engine.args,
     cwd: engine.cwd,
-    url: engine.url
+    url: engine.url,
+    resolveScript: engine.resolveScript,
+    env: engine.env
   })
 }
 
@@ -86,9 +88,10 @@ function connectStdio(engine: MemoryEngineConfig): Promise<McpSession> {
       return
     }
     const cwd = engine.cwd ? expandHome(engine.cwd) : process.cwd()
+    const { command, args } = resolveEngineSpawn(engine)
     let child: ChildProcess
     try {
-      child = spawn(engine.command, engine.args ?? [], {
+      child = spawn(command, args, {
         cwd,
         env: { ...process.env, ...(engine.env ?? {}) },
         stdio: ['pipe', 'pipe', 'pipe']
