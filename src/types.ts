@@ -38,8 +38,19 @@ export interface AdvisorEntry {
   instructions?: string
   /** Packaged skill ids (skills/<id>/SKILL.md) injected into this advisor's context. */
   skills?: string[]
+  /**
+   * How skills reach the advisor: 'inject' embeds full skill bodies in the
+   * system prompt (default); 'lazy' embeds only id+description and grants a
+   * `load_skill` tool so bodies are fetched on demand.
+   */
+  skillMode?: 'inject' | 'lazy'
   /** Built-in preset id this advisor was created from (enables "reset to preset skills"). */
   preset?: string
+  /**
+   * Workspace scoping: substring patterns matched against the session cwd.
+   * Empty/omitted = the advisor runs in every session.
+   */
+  workspaces?: string[]
   /** Per-advisor on/off toggle (default true). */
   enabled?: boolean
 }
@@ -55,6 +66,22 @@ export interface AdvisorSettings {
    * (interrupting severities flush the batch immediately).
    */
   adviceCoalesceMs: number
+  /**
+   * Auto-retry failed work. When on: failed advisor reviews re-run after
+   * `autoRetryDelayMs` (up to `autoRetryMax` attempts per review), and a
+   * failed primary-model turn receives an automatic "continue" followup
+   * message after the same delay (aborts and permanent errors never retry).
+   */
+  autoRetry: boolean
+  /** Delay before an auto-retry fires (ms). */
+  autoRetryDelayMs: number
+  /** Max auto-retry attempts per failed review / failure episode. */
+  autoRetryMax: number
+  /**
+   * Skip reviews whose rendered delta is smaller than this many characters
+   * (0 = review everything). Skipped deltas are not replayed later.
+   */
+  minDeltaChars: number
   advisors: AdvisorEntry[]
 }
 

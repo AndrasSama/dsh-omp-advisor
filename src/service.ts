@@ -7,7 +7,13 @@ import { Service } from '@deepseek-ai/cordis'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { registerAdvisorRpc } from './rpc'
 import { SessionAdvisorRuntime } from './runtime'
-import { SETTINGS_NAMESPACE, advisorSettingsSchema, normalizeSettings, normalizeSettingsLenient } from './settings'
+import {
+  SETTINGS_NAMESPACE,
+  advisorMatchesWorkspace,
+  advisorSettingsSchema,
+  normalizeSettings,
+  normalizeSettingsLenient
+} from './settings'
 import type { AdvisorSettings, CordisContextLike, SessionAdvisorSnapshot, SessionLike } from './types'
 
 export const SERVICE_NAME = 'dsh-omp-advisor'
@@ -28,6 +34,8 @@ export class AdvisorService extends Service {
   static inject = ['agents', 'llm', 'settings', 'connection']
 
   private runtimes = new Map<string, SessionAdvisorRuntime>()
+  /** Session cwd per session id, for workspace-scoped advisor filtering. */
+  private sessionCwds = new Map<string, string>()
   private settingsValue: AdvisorSettings
   private settingsScope: {
     get(): unknown
@@ -58,7 +66,7 @@ export class AdvisorService extends Service {
     hostCtx.on('session/created', (session: SessionLike) => {
       this.attach(session)
     })
-    hostCtx.on('session/event', (session: SessionLike, event: { type: string }) => {
+    hostCtx.on('session/event', (session: SessionLike, event: { type: string; data?: unknown }) => {
       this.onSessionEvent(session, event)
     })
     hostCtx.on('session/disposed', (session: SessionLike) => {
@@ -73,9 +81,13 @@ export class AdvisorService extends Service {
           runtime.dispose()
           this.runtimes.delete(id)
         }
+        this.sessionCwds.clear()
         return
       }
-      for (const runtime of this.runtimes.values()) runtime.rebuild(value)
+      for (const [id, runtime] of this.runtimes) {
+        const cwd = this.sessionCwds.get(id) ?? ''
+        runtime.rebuild(this.scopedSettings(value, cwd))
+      }
     })
 
     if (hostCtx.connection) {
@@ -85,6 +97,18 @@ export class AdvisorService extends Service {
 
   get settings(): AdvisorSettings {
     return this.settingsValue
+  }
+
+  /**
+   * Workspace scoping: narrow the roster to advisors whose `workspaces`
+   * patterns match the session cwd (advisors with no patterns run everywhere).
+   * The runtime only ever sees advisors that apply to its session.
+   */
+  private scopedSettings(value: AdvisorSettings, cwd: string): AdvisorSettings {
+    return {
+      ...value,
+      advisors: value.advisors.filter(entry => advisorMatchesWorkspace(entry, cwd))
+    }
   }
 
   /**
@@ -123,6 +147,8 @@ export class AdvisorService extends Service {
     const id = sessionIdOf(session)
     if (this.runtimes.has(id)) return
     const ctx = this.hostCtx
+    const cwd = sessionCwd(session)
+    this.sessionCwds.set(id, cwd)
     const runtime = new SessionAdvisorRuntime(
       {
         sessionId: id,
@@ -132,7 +158,7 @@ export class AdvisorService extends Service {
           const events = agent?.session?.events ?? (session.events as never)
           return (events ?? []) as never
         },
-        cwd: sessionCwd(session),
+        cwd,
         llm: ctx.llm,
         makeUserMessage: (text: string) =>
           createUserMessage({
@@ -141,7 +167,7 @@ export class AdvisorService extends Service {
           }),
         log: (message, meta) => ctx.logger?.debug?.(`${SERVICE_NAME}: ${message}`, meta ?? {})
       },
-      this.settingsValue,
+      this.scopedSettings(this.settingsValue, cwd),
       (text: string) =>
         createUserMessage({
           content: [{ type: 'text', text }],
@@ -151,7 +177,7 @@ export class AdvisorService extends Service {
     this.runtimes.set(id, runtime)
   }
 
-  private onSessionEvent(session: SessionLike, event: { type: string }): void {
+  private onSessionEvent(session: SessionLike, event: { type: string; data?: unknown }): void {
     if (!this.settingsValue.enabled) return
     const runtime = this.runtimes.get(sessionIdOf(session))
     if (!runtime) {
@@ -166,11 +192,14 @@ export class AdvisorService extends Service {
       runtime.enqueueReview(true)
     } else if (event.type === 'turn/end') {
       runtime.enqueueReview(false)
+      // Auto-retry hook: watch the turn outcome for primary-model failures.
+      runtime.onTurnEnd((event.data as { reason?: unknown } | undefined)?.reason)
     }
   }
 
   private detach(sessionId: string): void {
     const runtime = this.runtimes.get(sessionId)
+    this.sessionCwds.delete(sessionId)
     if (!runtime) return
     runtime.dispose()
     this.runtimes.delete(sessionId)

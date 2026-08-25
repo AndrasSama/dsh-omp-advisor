@@ -14,7 +14,7 @@ import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { ADVISE_TOOL_SCHEMA, AdviseGate } from './advise-tool'
 import { buildAdvisorQuarantineSourceText, quarantineAdvisorUnsafeOutput } from './quarantine'
-import { ADVISOR_TOOL_SCHEMAS, DEFAULT_ADVISOR_TOOL_NAMES, executeAdvisorTool } from './tools'
+import { ADVISOR_TOOL_SCHEMAS, DEFAULT_ADVISOR_TOOL_NAMES, LOAD_SKILL_TOOL_SCHEMA, executeAdvisorTool } from './tools'
 import type { AdvisorEntry, AdvisorSeverity, LlmContentBlock, LlmLike, LlmStreamChunk } from './types'
 import systemPrompt from './prompts/system.md'
 import adviseToolPrompt from './prompts/advise-tool.md'
@@ -146,14 +146,22 @@ export class AdvisorLoop {
   private skillsText(): string {
     const ids = this.entry.skills ?? []
     if (ids.length === 0) return ''
+    const lazy = this.entry.skillMode === 'lazy'
     const bodies: string[] = []
     for (const id of ids) {
       const skill = PACKAGED_SKILLS[id]
       if (!skill) continue // unknown ids are skipped, never fatal
-      bodies.push(`<skill name="${skill.id}">\n${skill.body}\n</skill>`)
+      if (lazy) {
+        bodies.push(`<skill name="${skill.id}">${skill.description}</skill>`)
+      } else {
+        bodies.push(`<skill name="${skill.id}">\n${skill.body}\n</skill>`)
+      }
     }
     if (bodies.length === 0) return ''
-    return `<skills>\n${bodies.join('\n')}\n</skills>`
+    const header = lazy
+      ? 'Curated skills are available on demand. The index below lists id + purpose; call `load_skill` with a skill id to read its full guidance before relying on it.'
+      : undefined
+    return header ? `<skills>\n${header}\n${bodies.join('\n')}\n</skills>` : `<skills>\n${bodies.join('\n')}\n</skills>`
   }
 
   private systemText(): string {
@@ -198,6 +206,7 @@ export class AdvisorLoop {
 
     const toolSchemas = [
       ...ADVISOR_TOOL_SCHEMAS,
+      ...(this.entry.skillMode === 'lazy' ? [LOAD_SKILL_TOOL_SCHEMA] : []),
       ADVISE_TOOL_SCHEMA
     ] as { name: string; description: string; parameters: Record<string, unknown> }[]
 

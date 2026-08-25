@@ -57,7 +57,23 @@ interface AdvisorSlot {
   lastError?: string
   quotaUntil?: number
   draining: boolean
-  queued: { inProgress: boolean }[]
+  queued: ReviewQueueItem[]
+}
+
+/** One queued review pass. Retries carry the pre-rendered delta text. */
+interface ReviewQueueItem {
+  inProgress: boolean
+  /** Set on auto-retry: re-review this exact delta instead of rendering a new one. */
+  retryText?: string
+  /** Auto-retry attempt number (0 = first try). */
+  attempt: number
+}
+
+/** Shape of the `turn/end` session event data the runtime watches for failures. */
+interface TurnEndReason {
+  kind?: string
+  error?: { message?: string; code?: string }
+  [key: string]: unknown
 }
 
 export interface SessionRuntimeHost {
@@ -84,6 +100,17 @@ export class SessionAdvisorRuntime {
   /** Notes buffered inside the coalesce window, across all advisors. */
   private pendingNotes: AdvisorNote[] = []
   private coalesceTimer?: ReturnType<typeof setTimeout>
+  /** Auto-retry of failed advisor reviews / failed primary turns. */
+  private autoRetry = true
+  private autoRetryDelayMs = 5000
+  private autoRetryMax = 3
+  /** Skip reviews whose rendered delta is smaller than this (chars; 0 = off). */
+  private minDeltaChars = 0
+  /** Primary-model failure episode state (resets on a completed turn). */
+  private continueAttempts = 0
+  private continueTimer?: ReturnType<typeof setTimeout>
+  /** Pending advisor retry timers, cleared on dispose. */
+  private retryTimers = new Set<ReturnType<typeof setTimeout>>()
 
   constructor(
     private readonly host: SessionRuntimeHost,
@@ -99,6 +126,10 @@ export class SessionAdvisorRuntime {
     if (this.disposed) return
     this.interruptSeverities = [...settings.interruptSeverities]
     this.coalesceMs = Math.max(0, settings.adviceCoalesceMs || 0)
+    this.autoRetry = settings.autoRetry !== false
+    this.autoRetryDelayMs = Math.min(300000, Math.max(1000, Math.round(settings.autoRetryDelayMs || 5000)))
+    this.autoRetryMax = Math.min(10, Math.max(1, Math.round(settings.autoRetryMax || 3)))
+    this.minDeltaChars = Math.min(100000, Math.max(0, Math.round(settings.minDeltaChars || 0)))
     const next = new Map<string, AdvisorSlot>()
     for (const entry of settings.advisors) {
       const key = entry.name
@@ -150,11 +181,25 @@ export class SessionAdvisorRuntime {
     if (this.disposed) return
     for (const slot of this.slots.values()) {
       if (slot.status !== 'running') continue
-      if (slot.queued.length > 0 && slot.queued[slot.queued.length - 1].inProgress === inProgress) continue
-      slot.queued.push({ inProgress })
+      const last = slot.queued[slot.queued.length - 1]
+      if (last && !last.retryText && last.inProgress === inProgress) continue
+      slot.queued.push({ inProgress, attempt: 0 })
       slot.backlog = slot.queued.length
       void this.drain(slot)
     }
+  }
+
+  /** Restart a slot's drain loop after a delay (auto-retry of failed reviews). */
+  private scheduleDrain(slot: AdvisorSlot, delayMs: number): void {
+    const timer = setTimeout(() => {
+      this.retryTimers.delete(timer)
+      if (this.disposed) return
+      // A quota status set for display must not block the scheduled retry.
+      if (slot.status === 'quota_exhausted') slot.status = 'running'
+      slot.quotaUntil = undefined
+      void this.drain(slot)
+    }, delayMs)
+    this.retryTimers.add(timer)
   }
 
   private async drain(slot: AdvisorSlot): Promise<void> {
@@ -173,35 +218,48 @@ export class SessionAdvisorRuntime {
           slot.status = 'running'
         }
 
-        const item = slot.queued.shift() as { inProgress: boolean }
+        const item = slot.queued.shift() as ReviewQueueItem
         slot.backlog = slot.queued.length
 
-        const events = this.host.getEvents()
-        const delta = renderDelta(events, slot.cursor, slot.updateIndex, item.inProgress)
-        slot.cursor = delta.nextCursor
-        if (!delta.text.trim()) {
-          continue // nothing renderable happened since the last review
+        let text: string
+        if (item.retryText !== undefined) {
+          // Auto-retry: re-review the exact delta that failed.
+          text = item.retryText
+        } else {
+          const events = this.host.getEvents()
+          const delta = renderDelta(events, slot.cursor, slot.updateIndex, item.inProgress)
+          slot.cursor = delta.nextCursor
+          text = delta.text
+          if (!text.trim()) {
+            continue // nothing renderable happened since the last review
+          }
+          if (this.minDeltaChars > 0 && text.trim().length < this.minDeltaChars) {
+            // Trivial delta: skip it. The cursor already advanced, so the
+            // skipped content is not replayed — later deltas start fresh.
+            this.host.log?.('advisor review skipped (delta below minDeltaChars)', {
+              session: this.host.sessionId,
+              advisor: slot.entry.name,
+              chars: text.trim().length,
+              min: this.minDeltaChars
+            })
+            continue
+          }
         }
 
         const controller = new AbortController()
-        const abort = () => controller.abort()
-        const agent = this.host.getAgent()
-        // A disposed session must not leave advisor calls in flight.
-        const disposeWatch = agent ? undefined : undefined
-        void disposeWatch
         try {
-          await slot.loop.review(delta.text, { inProgress: item.inProgress, signal: controller.signal })
+          await slot.loop.review(text, { inProgress: item.inProgress, signal: controller.signal })
           slot.updateIndex++
           slot.reviewsCompleted++
           slot.consecutiveFailures = 0
           slot.lastError = undefined
         } catch (error) {
           if (this.disposed) return
-          slot.consecutiveFailures++
           slot.lastError = String(error instanceof Error ? error.message : error)
           this.host.log?.('advisor review failed', {
             session: this.host.sessionId,
             advisor: slot.entry.name,
+            attempt: item.attempt,
             failures: slot.consecutiveFailures,
             error: slot.lastError
           })
@@ -211,6 +269,17 @@ export class SessionAdvisorRuntime {
             slot.backlog = 0
             return
           }
+          if (this.autoRetry && item.attempt < this.autoRetryMax) {
+            // Auto-retry the same delta after the configured delay. Quota
+            // failures show as quota_exhausted meanwhile; scheduleDrain clears
+            // both before the retry runs.
+            if (isQuotaFailure(error)) slot.status = 'quota_exhausted'
+            slot.queued.unshift({ inProgress: item.inProgress, retryText: text, attempt: item.attempt + 1 })
+            slot.backlog = slot.queued.length
+            this.scheduleDrain(slot, this.autoRetryDelayMs)
+            return
+          }
+          slot.consecutiveFailures++
           if (isQuotaFailure(error)) {
             slot.status = 'quota_exhausted'
             slot.quotaUntil = Date.now() + QUOTA_COOLDOWN_MS
@@ -334,6 +403,64 @@ export class SessionAdvisorRuntime {
     }
   }
 
+  /**
+   * Watch primary-turn outcomes for auto-retry. Fed from the session's
+   * `turn/end` event. A failed turn (model error) schedules an automatic
+   * "continue" followup message after the retry delay, bounded per failure
+   * episode; completed turns reset the episode, and aborts or permanent
+   * errors (unknown model/provider) never retry.
+   */
+  onTurnEnd(reason: unknown): void {
+    if (this.disposed) return
+    const data = (reason ?? {}) as TurnEndReason
+    const kind = typeof data.kind === 'string' ? data.kind : ''
+    if (kind !== 'error') {
+      // Completed, aborted, max-tokens, …: the episode ends.
+      this.continueAttempts = 0
+      return
+    }
+    if (!this.autoRetry) return
+    const message =
+      (typeof data.error?.message === 'string' && data.error.message) ||
+      (typeof data.error?.code === 'string' && data.error.code) ||
+      'unknown error'
+    if (isPermanentFailure(message)) {
+      this.host.log?.('primary turn failed permanently; no auto-continue', {
+        session: this.host.sessionId,
+        error: message
+      })
+      return
+    }
+    if (this.continueAttempts >= this.autoRetryMax) {
+      this.host.log?.('primary turn failed; auto-retry attempts exhausted', {
+        session: this.host.sessionId,
+        attempts: this.continueAttempts,
+        error: message
+      })
+      return
+    }
+    this.continueAttempts++
+    const attempt = this.continueAttempts
+    if (this.continueTimer !== undefined) clearTimeout(this.continueTimer)
+    this.continueTimer = setTimeout(() => {
+      this.continueTimer = undefined
+      if (this.disposed) return
+      const agent = this.host.getAgent()
+      if (!agent) return
+      const clipped = message.length > 200 ? `${message.slice(0, 200)}…` : message
+      agent.followup(
+        this.createUserMessage(
+          `[dsh-omp-advisor auto-retry ${attempt}/${this.autoRetryMax}] Your previous turn failed ("${clipped}"). Please continue from where you left off.`
+        )
+      )
+      this.host.log?.('auto-continue sent after failed primary turn', {
+        session: this.host.sessionId,
+        attempt,
+        error: message
+      })
+    }, this.autoRetryDelayMs)
+  }
+
   /** Pause or resume one advisor by name. */
   setPaused(name: string, paused: boolean): boolean {
     const slot = this.slots.get(name)
@@ -354,6 +481,12 @@ export class SessionAdvisorRuntime {
       clearTimeout(this.coalesceTimer)
       this.coalesceTimer = undefined
     }
+    if (this.continueTimer !== undefined) {
+      clearTimeout(this.continueTimer)
+      this.continueTimer = undefined
+    }
+    for (const timer of this.retryTimers) clearTimeout(timer)
+    this.retryTimers.clear()
     // Buffered notes are dropped: a disposed session must not receive advice.
     this.pendingNotes = []
     for (const slot of this.slots.values()) {

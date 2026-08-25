@@ -27,6 +27,8 @@ interface AdvisorEntryView {
   instructions?: string
   enabled?: boolean
   skills?: string[]
+  skillMode?: 'inject' | 'lazy'
+  workspaces?: string[]
   preset?: string
 }
 
@@ -35,6 +37,10 @@ interface SettingsView {
   reviewTrigger: 'step' | 'turn'
   interruptSeverities: ('nit' | 'concern' | 'blocker')[]
   adviceCoalesceMs: number
+  autoRetry: boolean
+  autoRetryDelayMs: number
+  autoRetryMax: number
+  minDeltaChars: number
   advisors: AdvisorEntryView[]
 }
 
@@ -138,6 +144,42 @@ const STATUS_COLORS: Record<string, string> = {
   error: '#dc5050',
   halted: '#dc5050',
   no_model: '#8a8a8a'
+}
+
+/**
+ * Comma-separated workspace pattern editor. Keeps a local text buffer so the
+ * user can type commas/spaces freely; commits the parsed list on blur/Enter
+ * and re-syncs from props when the server value changes underneath.
+ */
+function WorkspacesInput(props: { value: string[]; onCommit(next: string[]): void }): React.ReactElement {
+  const joined = props.value.join(', ')
+  const [text, setText] = useState(joined)
+  const lastJoined = useRef(joined)
+  if (lastJoined.current !== joined) {
+    lastJoined.current = joined
+    setText(joined)
+  }
+  const commit = (): void => {
+    const next = text
+      .split(',')
+      .map(part => part.trim())
+      .filter(part => part !== '')
+    lastJoined.current = next.join(', ')
+    setText(next.join(', '))
+    props.onCommit(next)
+  }
+  return (
+    <input
+      style={{ ...styles.input, flex: 1, minWidth: 220 }}
+      placeholder="all workspaces (empty) — or patterns like: Qwest Chain, /home/sama/novels"
+      value={text}
+      onChange={event => setText(event.target.value)}
+      onBlur={commit}
+      onKeyDown={event => {
+        if (event.key === 'Enter') commit()
+      }}
+    />
+  )
 }
 
 /* --------------------------------- component -------------------------------- */
@@ -397,6 +439,12 @@ export function createSettingsSection(ctx: ClientCtx): React.ComponentType<{ clo
               <option value="turn">Turn end — review completed turns</option>
               <option value="step">Step end — review while the turn runs</option>
             </select>
+            {value.reviewTrigger === 'step' ? (
+              <span style={{ ...styles.hint, color: 'rgb(220,160,90)' }}>
+                Step mode fires a review on every tool step — heavy on rate-limited or metered providers. Prefer
+                turn mode unless you need mid-turn advice.
+              </span>
+            ) : null}
           </div>
           <div style={styles.row}>
             <span style={styles.label}>Interrupting severities</span>
@@ -436,6 +484,76 @@ export function createSettingsSection(ctx: ClientCtx): React.ComponentType<{ clo
             <span style={styles.hint}>
               0 = deliver each note immediately. Above 0, notes from all advisors are batched within the window
               into one message per channel; an interrupting severity flushes the batch at once.
+            </span>
+          </div>
+          <div style={styles.row}>
+            <span style={styles.label}>Auto-retry failures</span>
+            <label>
+              <input
+                type="checkbox"
+                checked={value.autoRetry !== false}
+                onChange={event => write('autoRetry', event.target.checked)}
+              />{' '}
+              retry failed work automatically
+            </label>
+            <span style={{ ...styles.hint, opacity: 0.75 }}>after</span>
+            <input
+              type="number"
+              min={1000}
+              max={300000}
+              step={500}
+              style={{ ...styles.input, width: 90 }}
+              value={value.autoRetryDelayMs ?? 5000}
+              onChange={event => {
+                const parsed = Number.parseInt(event.target.value, 10)
+                if (Number.isFinite(parsed)) {
+                  write('autoRetryDelayMs', Math.min(300000, Math.max(1000, parsed)))
+                }
+              }}
+            />
+            <span style={{ ...styles.hint, opacity: 0.75 }}>ms, up to</span>
+            <input
+              type="number"
+              min={1}
+              max={10}
+              step={1}
+              style={{ ...styles.input, width: 60 }}
+              value={value.autoRetryMax ?? 3}
+              onChange={event => {
+                const parsed = Number.parseInt(event.target.value, 10)
+                if (Number.isFinite(parsed)) {
+                  write('autoRetryMax', Math.min(10, Math.max(1, parsed)))
+                }
+              }}
+            />
+            <span style={{ ...styles.hint, opacity: 0.75 }}>attempts</span>
+          </div>
+          <div style={styles.row}>
+            <span style={styles.label} />
+            <span style={styles.hint}>
+              Failed advisor reviews re-run after the delay; a failed primary-model turn receives an automatic
+              “continue” message. User aborts and permanent errors (unknown model/provider) never retry.
+            </span>
+          </div>
+          <div style={styles.row}>
+            <span style={styles.label}>Skip tiny deltas (chars)</span>
+            <input
+              type="number"
+              min={0}
+              max={100000}
+              step={50}
+              style={{ ...styles.input, width: 90 }}
+              value={value.minDeltaChars ?? 0}
+              onChange={event => {
+                const parsed = Number.parseInt(event.target.value, 10)
+                if (Number.isFinite(parsed)) {
+                  write('minDeltaChars', Math.min(100000, Math.max(0, parsed)))
+                }
+              }}
+            />
+            <span style={styles.hint}>
+              0 = review everything. Above 0, transcript updates smaller than this are skipped (not replayed
+              later) — cuts advisor calls on chatty sessions.
             </span>
           </div>
         </div>
@@ -573,6 +691,20 @@ export function createSettingsSection(ctx: ClientCtx): React.ComponentType<{ clo
                   value={entry.instructions ?? ''}
                   onChange={event => updateAdvisor(index, { instructions: event.target.value })}
                 />
+                <div style={styles.row}>
+                  <span style={{ ...styles.hint, minWidth: 150 }}>Workspaces</span>
+                  <WorkspacesInput
+                    value={entry.workspaces ?? []}
+                    onCommit={next => updateAdvisor(index, { workspaces: next })}
+                  />
+                </div>
+                <div style={styles.row}>
+                  <span style={{ ...styles.hint, minWidth: 150 }} />
+                  <span style={styles.hint}>
+                    Comma-separated substrings matched against the session's workspace path; this advisor only
+                    runs in matching sessions. Leave empty for every session.
+                  </span>
+                </div>
                 {(() => {
                   const skills = entry.skills ?? []
                   const preset = entry.preset ? findPreset(entry.preset) : undefined
@@ -581,6 +713,17 @@ export function createSettingsSection(ctx: ClientCtx): React.ComponentType<{ clo
                     <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                       <div style={styles.row}>
                         <span style={{ ...styles.hint, minWidth: 150 }}>Skills ({skills.length})</span>
+                        <select
+                          style={{ ...styles.select, maxWidth: 260 }}
+                          value={entry.skillMode === 'lazy' ? 'lazy' : 'inject'}
+                          title="inject = embed full skill bodies in the system prompt; lazy = id+description index plus a load_skill tool (saves tokens, costs one extra call per loaded skill)"
+                          onChange={event =>
+                            updateAdvisor(index, { skillMode: event.target.value === 'lazy' ? 'lazy' : 'inject' })
+                          }
+                        >
+                          <option value="inject">inject full bodies into prompt</option>
+                          <option value="lazy">lazy — load_skill on demand</option>
+                        </select>
                         {preset && (
                           <>
                             <span style={styles.hint}>preset: {preset.name}</span>
@@ -687,6 +830,16 @@ export function createSettingsSection(ctx: ClientCtx): React.ComponentType<{ clo
                     </span>
                   ))}
                 </div>
+                {session.advisors
+                  .filter(advisor => advisor.lastError)
+                  .map(advisor => (
+                    <span
+                      key={`${advisor.name}-error`}
+                      style={{ ...styles.hint, color: '#dc7070', whiteSpace: 'pre-wrap' }}
+                    >
+                      ⚠ {advisor.name}: {advisor.lastError}
+                    </span>
+                  ))}
               </div>
             ))
           )}

@@ -6,6 +6,7 @@ import {
   AdvisorLoop,
   AdvisorOutputQuarantinedError,
   SessionAdvisorRuntime,
+  advisorMatchesWorkspace,
   formatAdvisorBatchContent,
   normalizeSettings,
   normalizeSettingsLenient,
@@ -688,9 +689,11 @@ test('advisor loop omits the skills block when no skills are configured', async 
 function stubAgent(status = 'idle') {
   const injected = []
   const steered = []
+  const followups = []
   return {
     injected,
     steered,
+    followups,
     id: 'agent-1',
     status,
     session: { id: 's1', events: [] },
@@ -700,7 +703,9 @@ function stubAgent(status = 'idle') {
     steer(message) {
       steered.push(message)
     },
-    followup() {}
+    followup(message) {
+      followups.push(message)
+    }
   }
 }
 
@@ -776,4 +781,310 @@ test('dispose cancels the coalesce timer and drops buffered notes', async () => 
   await new Promise(resolve => setTimeout(resolve, 100))
   assert.equal(agent.injected.length, 0)
   assert.equal(agent.steered.length, 0)
+})
+
+/* ------------------- settings: auto-retry / scoping / min-delta ------------------- */
+
+test('normalizeSettings clamps auto-retry and min-delta, carries workspaces and skillMode', () => {
+  const value = normalizeSettings({
+    enabled: true,
+    autoRetry: true,
+    autoRetryDelayMs: 999999,
+    autoRetryMax: 42,
+    minDeltaChars: -5,
+    advisors: [
+      {
+        name: 'a',
+        provider: 'p',
+        model: 'm',
+        maxTurns: 4,
+        skillMode: 'lazy',
+        workspaces: [' Qwest Chain ', '', 7]
+      }
+    ]
+  })
+  assert.equal(value.autoRetry, true)
+  assert.equal(value.autoRetryDelayMs, 300000)
+  assert.equal(value.autoRetryMax, 10)
+  assert.equal(value.minDeltaChars, 0)
+  assert.equal(value.advisors[0].skillMode, 'lazy')
+  assert.deepEqual(value.advisors[0].workspaces, ['Qwest Chain'])
+})
+
+test('normalizeSettings defaults auto-retry on with conservative bounds', () => {
+  const value = normalizeSettings({})
+  assert.equal(value.autoRetry, true)
+  assert.equal(value.autoRetryDelayMs, 5000)
+  assert.equal(value.autoRetryMax, 3)
+  assert.equal(value.minDeltaChars, 0)
+  // inject is the default skill mode and is not stored explicitly
+  assert.equal(normalizeSettings({ advisors: [{ name: 'a', provider: 'p', model: 'm', maxTurns: 4 }] }).advisors[0].skillMode, undefined)
+})
+
+test('advisorMatchesWorkspace matches cwd substrings; empty patterns run everywhere', () => {
+  assert.equal(advisorMatchesWorkspace({}, '/home/sama/Qwest Chain'), true)
+  assert.equal(advisorMatchesWorkspace({ workspaces: [] }, '/anything'), true)
+  assert.equal(advisorMatchesWorkspace({ workspaces: ['Qwest Chain'] }, '/home/sama/Qwest Chain'), true)
+  assert.equal(advisorMatchesWorkspace({ workspaces: ['novels'] }, '/home/sama/Qwest Chain'), false)
+  assert.equal(advisorMatchesWorkspace({ workspaces: ['   ', 'novels'] }, '/home/sama/novels/draft'), true)
+  assert.equal(advisorMatchesWorkspace({ workspaces: ['   '] }, '/home/sama/x'), true) // blank-only = everywhere
+})
+
+/* ----------------------- runtime: advisor review auto-retry ----------------------- */
+
+function scriptedLlm(turns) {
+  let call = 0
+  return {
+    calls: [],
+    stream(options) {
+      this.calls.push(options)
+      const script = turns[Math.min(call, turns.length - 1)]
+      call++
+      return {
+        async *[Symbol.asyncIterator]() {
+          if (script === 'FAIL') {
+            yield { type: 'finish', reason: { kind: 'error', failure: { message: '429 rate limited', code: 'RATE_LIMIT' } } }
+            return
+          }
+          for (const block of script) {
+            yield { type: 'block-end', index: 0, block }
+          }
+          yield { type: 'finish', reason: { kind: script.some(b => b.type === 'tool-call') ? 'tool-calls' : 'stop' } }
+        }
+      }
+    }
+  }
+}
+
+const retryBaseSettings = {
+  enabled: true,
+  reviewTrigger: 'turn',
+  interruptSeverities: ['concern', 'blocker'],
+  adviceCoalesceMs: 0,
+  autoRetry: true,
+  autoRetryDelayMs: 1000,
+  autoRetryMax: 3,
+  minDeltaChars: 0,
+  advisors: [{ name: 'a', provider: 'p', model: 'm', maxTurns: 2 }]
+}
+
+function runtimeWithEvents({ llm, agent, events, settings }) {
+  const host = {
+    sessionId: 's1',
+    getAgent: () => agent,
+    getEvents: () => events,
+    cwd: process.cwd(),
+    llm,
+    makeUserMessage: text => ({ kind: 'user', text }),
+    log: () => {}
+  }
+  return new SessionAdvisorRuntime(host, settings, text => ({ kind: 'user', text }))
+}
+
+const oneUserEvent = [{ type: 'user/message', data: { content: [{ type: 'text', text: 'hello advisor' }] } }]
+
+test('auto-retry re-runs a failed advisor review after the delay and delivers', async () => {
+  const agent = stubAgent()
+  const llm = scriptedLlm([
+    'FAIL',
+    [{ type: 'tool-call', id: 'c1', name: 'advise', arguments: JSON.stringify({ note: 'second try worked', severity: 'nit' }) }]
+  ])
+  const runtime = runtimeWithEvents({ llm, agent, events: oneUserEvent, settings: retryBaseSettings })
+  runtime.autoRetryDelayMs = 30 // test-local override (settings clamp to >= 1000)
+  runtime.enqueueReview(false)
+  await new Promise(resolve => setTimeout(resolve, 150))
+  assert.equal(llm.calls.length, 2)
+  assert.equal(agent.injected.length, 1)
+  assert.match(agent.injected[0].text, /second try worked/)
+  runtime.dispose()
+})
+
+test('auto-retry stops after autoRetryMax attempts', async () => {
+  const agent = stubAgent()
+  const llm = scriptedLlm(['FAIL'])
+  const runtime = runtimeWithEvents({
+    llm,
+    agent,
+    events: oneUserEvent,
+    settings: { ...retryBaseSettings, autoRetryMax: 2 }
+  })
+  runtime.autoRetryDelayMs = 20
+  runtime.enqueueReview(false)
+  await new Promise(resolve => setTimeout(resolve, 250))
+  // initial attempt + 2 retries, then the failure path gives up on this item
+  assert.equal(llm.calls.length, 3)
+  assert.equal(agent.injected.length, 0)
+  runtime.dispose()
+})
+
+test('auto-retry off keeps the single-attempt failure behavior', async () => {
+  const agent = stubAgent()
+  const llm = scriptedLlm(['FAIL'])
+  const runtime = runtimeWithEvents({
+    llm,
+    agent,
+    events: oneUserEvent,
+    settings: { ...retryBaseSettings, autoRetry: false }
+  })
+  runtime.enqueueReview(false)
+  await new Promise(resolve => setTimeout(resolve, 80))
+  assert.equal(llm.calls.length, 1)
+  runtime.dispose()
+})
+
+test('minDeltaChars skips tiny deltas without calling the model', async () => {
+  const agent = stubAgent()
+  const llm = scriptedLlm([[{ type: 'text', text: 'ok' }]])
+  const runtime = runtimeWithEvents({
+    llm,
+    agent,
+    events: oneUserEvent,
+    settings: { ...retryBaseSettings, minDeltaChars: 5000 }
+  })
+  runtime.enqueueReview(false)
+  await new Promise(resolve => setTimeout(resolve, 60))
+  assert.equal(llm.calls.length, 0)
+  runtime.dispose()
+})
+
+/* ----------------------- runtime: primary-model auto-continue ----------------------- */
+
+test('failed primary turn receives an automatic continue followup after the delay', async () => {
+  const agent = stubAgent()
+  const runtime = runtimeWithEvents({ llm: scriptedLlm([]), agent, events: [], settings: retryBaseSettings })
+  runtime.autoRetryDelayMs = 30
+  runtime.onTurnEnd({ kind: 'error', error: { message: '429: rate limited', code: 'RATE_LIMIT' } })
+  assert.equal(agent.followups.length, 0)
+  await new Promise(resolve => setTimeout(resolve, 100))
+  assert.equal(agent.followups.length, 1)
+  assert.match(agent.followups[0].text, /continue from where you left off/i)
+  assert.match(agent.followups[0].text, /rate limited/)
+  runtime.dispose()
+})
+
+test('auto-continue is capped per episode and resets on a completed turn', async () => {
+  const agent = stubAgent()
+  const runtime = runtimeWithEvents({
+    llm: scriptedLlm([]),
+    agent,
+    events: [],
+    settings: { ...retryBaseSettings, autoRetryMax: 2 }
+  })
+  runtime.autoRetryDelayMs = 10
+  const fail = { kind: 'error', error: { message: 'boom', code: 'PROVIDER_ERROR' } }
+  runtime.onTurnEnd(fail)
+  await new Promise(resolve => setTimeout(resolve, 40))
+  runtime.onTurnEnd(fail)
+  await new Promise(resolve => setTimeout(resolve, 40))
+  runtime.onTurnEnd(fail) // third failure: attempts exhausted, no followup
+  await new Promise(resolve => setTimeout(resolve, 40))
+  assert.equal(agent.followups.length, 2)
+
+  runtime.onTurnEnd({ kind: 'completed' }) // episode resets
+  runtime.onTurnEnd(fail)
+  await new Promise(resolve => setTimeout(resolve, 40))
+  assert.equal(agent.followups.length, 3)
+  runtime.dispose()
+})
+
+test('aborted turns never auto-continue', async () => {
+  const agent = stubAgent()
+  const runtime = runtimeWithEvents({ llm: scriptedLlm([]), agent, events: [], settings: retryBaseSettings })
+  runtime.autoRetryDelayMs = 10
+  runtime.onTurnEnd({ kind: 'aborted', reason: 'user cancelled' })
+  await new Promise(resolve => setTimeout(resolve, 50))
+  assert.equal(agent.followups.length, 0)
+  runtime.dispose()
+})
+
+test('permanent primary errors never auto-continue', async () => {
+  const agent = stubAgent()
+  const runtime = runtimeWithEvents({ llm: scriptedLlm([]), agent, events: [], settings: retryBaseSettings })
+  runtime.autoRetryDelayMs = 10
+  runtime.onTurnEnd({ kind: 'error', error: { message: 'model not found: foo/bar', code: 'NOT_FOUND' } })
+  await new Promise(resolve => setTimeout(resolve, 50))
+  assert.equal(agent.followups.length, 0)
+  runtime.dispose()
+})
+
+test('auto-retry disabled sends no continue message', async () => {
+  const agent = stubAgent()
+  const runtime = runtimeWithEvents({
+    llm: scriptedLlm([]),
+    agent,
+    events: [],
+    settings: { ...retryBaseSettings, autoRetry: false }
+  })
+  runtime.autoRetryDelayMs = 10
+  runtime.onTurnEnd({ kind: 'error', error: { message: 'boom', code: 'X' } })
+  await new Promise(resolve => setTimeout(resolve, 50))
+  assert.equal(agent.followups.length, 0)
+  runtime.dispose()
+})
+
+test('dispose cancels a pending auto-continue', async () => {
+  const agent = stubAgent()
+  const runtime = runtimeWithEvents({ llm: scriptedLlm([]), agent, events: [], settings: retryBaseSettings })
+  runtime.autoRetryDelayMs = 30
+  runtime.onTurnEnd({ kind: 'error', error: { message: 'boom', code: 'X' } })
+  runtime.dispose()
+  await new Promise(resolve => setTimeout(resolve, 80))
+  assert.equal(agent.followups.length, 0)
+})
+
+/* ------------------------------ tools: load_skill ------------------------------ */
+
+test('load_skill returns the packaged skill body', async () => {
+  const result = await executeAdvisorTool(
+    { cwd: process.cwd() },
+    'load_skill',
+    JSON.stringify({ id: 'defensive-patterns' })
+  )
+  assert.notEqual(result.isError, true)
+  assert.match(result.text, /## Watch for/)
+})
+
+test('load_skill rejects unknown ids and suggests near matches', async () => {
+  const result = await executeAdvisorTool(
+    { cwd: process.cwd() },
+    'load_skill',
+    JSON.stringify({ id: 'defensive-pat' })
+  )
+  assert.equal(result.isError, true)
+  assert.match(result.text, /defensive-patterns/)
+})
+
+/* --------------------------- advisor loop: lazy skills --------------------------- */
+
+test('lazy skill mode embeds only the index and grants load_skill', async () => {
+  const llm = mockLlm([
+    [{ type: 'tool-call', id: 'c1', name: 'load_skill', arguments: JSON.stringify({ id: 'defensive-patterns' }) }],
+    [{ type: 'text', text: 'reviewed' }]
+  ])
+  const loop = new AdvisorLoop(
+    { llm, cwd: process.cwd(), onAdvice: () => {} },
+    { ...baseEntry, skills: ['defensive-patterns'], skillMode: 'lazy' }
+  )
+  await loop.review('## Update 1\n\n### User\nhello', { inProgress: false, signal: new AbortController().signal })
+
+  const system = llm.calls[0].system
+  assert.match(system, /<skill name="defensive-patterns">/)
+  assert.doesNotMatch(system, /## Watch for/) // body NOT embedded in lazy mode
+  assert.ok(llm.calls[0].tools.map(t => t.name).includes('load_skill'))
+
+  // The load_skill result carries the full body back to the model.
+  const toolResult = llm.calls[1].messages.flatMap(m => m.content).find(b => b.type === 'tool-result')
+  assert.ok(toolResult)
+  assert.match(toolResult.content[0].text, /## Watch for/)
+})
+
+test('inject skill mode keeps full bodies and withholds load_skill', async () => {
+  const llm = mockLlm([[{ type: 'text', text: 'reviewed' }]])
+  const loop = new AdvisorLoop(
+    { llm, cwd: process.cwd(), onAdvice: () => {} },
+    { ...baseEntry, skills: ['defensive-patterns'] }
+  )
+  await loop.review('## Update 1\n\n### User\nhello', { inProgress: false, signal: new AbortController().signal })
+  assert.match(llm.calls[0].system, /## Watch for/)
+  assert.ok(!llm.calls[0].tools.map(t => t.name).includes('load_skill'))
 })

@@ -6,6 +6,7 @@
  */
 import { readFile, readdir, stat } from 'node:fs/promises'
 import { resolve, relative, join } from 'node:path'
+import { PACKAGED_SKILLS } from './skills.generated'
 
 const OUTPUT_LIMIT = 8000
 const MAX_GREP_FILES = 200
@@ -169,8 +170,41 @@ export const ADVISOR_TOOL_SCHEMAS = [
   }
 ] as const
 
+/**
+ * Skill loader schema, granted only in `lazy` skill mode (bodies fetched on
+ * demand instead of embedded in the system prompt).
+ */
+export const LOAD_SKILL_TOOL_SCHEMA = {
+  name: 'load_skill',
+  description:
+    'Load the full body of one packaged advisor skill by id. Use it to read a skill listed in your <skills> index before relying on it.',
+  parameters: {
+    type: 'object',
+    additionalProperties: false,
+    required: ['id'],
+    properties: {
+      id: { type: 'string', description: 'Skill id from the <skills> index, e.g. "defensive-patterns".' }
+    }
+  }
+} as const
+
 /** Names granted to advisors by default (the oh-my-pi default subset). */
-export const DEFAULT_ADVISOR_TOOL_NAMES: ReadonlySet<string> = new Set(['read', 'grep', 'glob', 'advise'])
+export const DEFAULT_ADVISOR_TOOL_NAMES: ReadonlySet<string> = new Set(['read', 'grep', 'glob', 'advise', 'load_skill'])
+
+async function loadSkillTool(_ctx: AdvisorToolContext, args: { id: string }): Promise<AdvisorToolResult> {
+  const id = String(args.id ?? '').trim()
+  const skill = PACKAGED_SKILLS[id]
+  if (!skill) {
+    const known = Object.keys(PACKAGED_SKILLS)
+      .filter(k => k.includes(id))
+      .slice(0, 8)
+    return {
+      text: `unknown skill id "${id}"${known.length > 0 ? ` — did you mean: ${known.join(', ')}?` : ''}`,
+      isError: true
+    }
+  }
+  return { text: clip(skill.body) }
+}
 
 /** Execute one advisor tool call. Unknown tools throw. */
 export async function executeAdvisorTool(
@@ -197,6 +231,9 @@ export async function executeAdvisorTool(
       case 'glob':
         if (typeof args.pattern !== 'string') return { text: 'pattern is required', isError: true }
         return await globTool(ctx, args)
+      case 'load_skill':
+        if (typeof args.id !== 'string') return { text: 'id is required', isError: true }
+        return await loadSkillTool(ctx, args)
       default:
         throw new Error(`unknown advisor tool: ${name}`)
     }

@@ -29,6 +29,11 @@ primary agent ──► session log ──► delta renderer ──► advisor m
   - Window active — the timer starts on the first buffered note; when it fires, the batch is grouped by channel at emit time (steer vs inject is re-resolved against the primary's *current* state) and sent as one message per non-empty channel.
   - Interrupting severity — a `concern`/`blocker` (per your interrupting set) **flushes the whole batch immediately**, so urgent advice never waits out the window.
   - Session dispose cancels the timer and drops buffered notes: a disposed session never receives advice.
+- **Auto-retry (optional, on by default).** Failures recover automatically instead of dying silently:
+  - A failed advisor review (rate limit, transient provider error) re-runs the *same* delta after the configured delay, up to the configured attempt cap.
+  - A failed **primary-model turn** (`turn/end` with `reason.kind: "error"`) receives an automatic *"continue from where you left off"* followup message after the same delay, bounded per failure episode and reset by any completed turn.
+  - User aborts and permanent errors (unknown model/provider) never retry. Toggle the whole feature off with **Auto-retry failures**.
+- **Tiny-delta skip (optional).** With **Skip tiny deltas** set, transcript updates smaller than the threshold are skipped without calling the advisor model — a cheap way to cut advisor traffic on chatty sessions (skipped deltas are not replayed later).
 - **Containment (ported).** Output quarantine (unavailable-tool requests, output-only destructive directives), 3-consecutive-failure backlog drop, permanent-error halt until settings change, quota/rate-limit cooldown pause. The advisor **never blocks the primary agent** — a deliberate, safer deviation from oh-my-pi's catch-up wait.
 
 ## Install
@@ -46,16 +51,20 @@ Then restart DSH Web and hard-refresh the browser (Ctrl+Shift+R).
 Open **Settings → OMP Advisor**:
 
 - **Attach advisors to sessions** — master switch (off by default).
-- **Review trigger** — `turn` (review completed turns) or `step` (review while the turn runs).
+- **Review trigger** — `turn` (review completed turns) or `step` (review while the turn runs). Step mode fires on every tool step — the UI warns it is heavy on rate-limited or metered providers.
 - **Interrupting severities** — which severities steer; the rest ride as non-interrupting context.
 - **Coalesce advice (ms)** — `0` = deliver each note immediately; `>0` = batch notes from all advisors within the window into one message per channel (see [How it works](#how-it-works)). Clamped to 0–10000.
+- **Auto-retry failures** — toggle + delay (ms, 1000–300000, default 5000) + attempt cap (1–10, default 3). Retries failed advisor reviews and sends an automatic "continue" to a failed primary turn (see [How it works](#how-it-works)).
+- **Skip tiny deltas (chars)** — `0` = review everything; `>0` = skip transcript updates smaller than this.
 - **Add from preset** — one click creates a ready-made advisor from one of the 25 built-in personas (see [Presets](#presets)).
 - **Advisors** — the roster. Per advisor:
   - name,
   - **model picked from the DSH model list** (provider route → model → optional reasoning effort),
   - **max turns** — the advisor's tool-loop budget per review (1–10, default 4),
   - optional specialization instructions (e.g. *"Focus on security: injection, secrets, unsafe deserialization."*),
+  - **workspaces** — comma-separated substrings matched against the session's workspace path; the advisor only runs in matching sessions (empty = every session). This is how you give the writing bench to your novel workspace and the engineering bench to your code workspace.
   - **skills** — the advisor's curated skill chips: remove one (`×`), add any packaged skill from the catalog dropdown, or **reset to preset defaults** if the advisor was created from a preset (see [Skills](#skills)),
+  - **skill delivery** — `inject` (default: full skill bodies in the system prompt) or `lazy` (id+description index plus a `load_skill` tool — saves tokens, costs one extra call per loaded skill),
   - per-advisor enable toggle.
 
 Settings live in the `dsh-omp-advisor` namespace and apply **live** — no restart needed when you edit the roster.
@@ -100,16 +109,17 @@ Domain presets (finance, legal, privacy, marketing…) frame their advice as **r
 
 The plugin packages **250 advisor skills** under [`skills/<id>/SKILL.md`](./skills) — 10 curated per preset. Each skill is a compact briefing (what to watch for, best practices, a quick checklist) that sharpens the advisor in a specific domain, e.g. `n-plus-one-query-audit`, `prompt-injection-via-tool-results`, `gdpr-data-mapping`, `cliffhanger-mechanics`.
 
-- **Injection.** An advisor's configured skill bodies are embedded into its system prompt as `<skills><skill name="id">…</skill></skills>` on every review call. Unknown ids are skipped, never fatal.
+- **Injection (default).** An advisor's configured skill bodies are embedded into its system prompt as `<skills><skill name="id">…</skill></skills>` on every review call. Unknown ids are skipped, never fatal. One model call covers everything — best on rate-limited providers.
+- **Lazy loading (opt-in per advisor).** With skill delivery set to `lazy`, the system prompt carries only an id+description index and the advisor gets a `load_skill` tool to fetch a body on demand. Saves ~15KB of prompt per advisor; each loaded skill costs one extra tool-loop call, so prefer it on token-metered providers with headroom.
 - **Per-advisor editor.** Every advisor card lists its skills as chips: `×` removes one, the **+ add packaged skill…** dropdown adds any of the 250 (with its description as tooltip), and advisors created from a preset get a **reset to preset defaults** button restoring the curated list.
 - **Build-time embedding.** `scripts/gen-skills.mjs` scans `skills/` and generates the host embed (full bodies) and the client catalog (ids + descriptions) before every build and test run; the `skills/` tree is the source of truth and ships in the package.
 
 ## Safety model
 
-- Advisors get **read-only** tools confined to the watched session's workspace (`read`, `grep`, `glob`). No mutating tools in v1 — oh-my-pi's WATCHDOG.yml grant system is future work.
+- Advisors get **read-only** tools confined to the watched session's workspace (`read`, `grep`, `glob`, plus `load_skill` in lazy mode). No mutating tools yet — oh-my-pi's WATCHDOG.yml grant system is planned for v0.4 behind DSH's approval flow.
 - Advisor output passes a quarantine before it can become context: requests for unavailable tools and output-only destructive directives (ported hazard patterns) are replaced with a sanitized error.
 - Advisories injected into the session are excluded from future advisor deltas (no feedback loops).
-- The plugin never cancels, blocks, or gates the primary agent.
+- The plugin never cancels, blocks, or gates the primary agent. Auto-retry only ever *adds* a followup message after a failed turn — it never suppresses, rewrites, or re-drives anything else, and it stops after the configured attempt cap.
 - The `/dsh-omp-advisor` RPC registers with `authority: 'trusted-host'`: requests pass the same Host/Origin trust fence as `/api` (loopback, or a deployment's `--trusted-host` authorities), so the settings section and live status panel also work from remote GUIs. Handlers return `RpcResult` values and never throw.
 - Settings reads and writes ride that same channel (`snapshot` / `update` endpoints) instead of `ctx.settingsScope`: DSH keeps settingsScope persistence loopback-only, so a scope-bound section would render "unavailable" in every remote browser. Host-side, `update` still goes through the settings domain's schema + validation + live watch.
 
@@ -118,7 +128,7 @@ The plugin packages **250 advisor skills** under [`skills/<id>/SKILL.md`](./skil
 ```bash
 npm install        # dev deps only; DSH packages are runtime-provided
 npm run build      # gen-skills + host ESM (lib/index.js) + client CJS ModuleLoader bundle (lib/client.js)
-npm test           # 49 unit tests over the ported semantics
+npm test           # 66 unit tests over the ported semantics
 npm run typecheck  # tsc --noEmit (DSH packages shimmed)
 ```
 
@@ -130,9 +140,10 @@ Advisor semantics and prompt texts ported from [can1357/oh-my-pi](https://github
 
 This plugin: MIT — see [`LICENSE`](./LICENSE).
 
-## Known limitations (v1)
+## Known limitations
 
 - Advisories render as ordinary plugin messages in the conversation (a dedicated advisory card is future work).
-- No mutating-tool grants for advisors (oh-my-pi's WATCHDOG.yml roster).
+- No mutating-tool grants for advisors yet (oh-my-pi's WATCHDOG.yml roster) — targeted for v0.4 behind the DSH approval flow.
+- No in-session "advisors watching" badge yet; health is visible in the settings Live status panel (errors now show inline there).
 - Status panel polls every 5 s while the settings section is open; no push yet.
 - Web profile UI; other profiles can still configure the namespace by hand.
