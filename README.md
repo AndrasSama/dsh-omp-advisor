@@ -38,13 +38,81 @@ primary agent ──► session log ──► delta renderer ──► advisor m
 
 ## Install
 
+**Prerequisites**
+
+- DeepSeek Harness `0.1.0-rc.8` or newer with the **web profile** (`dsh web`).
+- At least one model configured in DSH's model list — each advisor needs a provider route + model picked from that list.
+- The plugin is inert until enabled: the master switch (**Attach advisors to sessions**) is **off by default**.
+
+**Install**
+
 ```bash
+# from GitHub
 dsh plugin --profile web add github:AndrasSama/dsh-omp-advisor
-# or from a local checkout:
+# or from a local checkout
 dsh plugin --profile web add "file:/path/to/dsh-omp-advisor"
 ```
 
-Then restart DSH Web and hard-refresh the browser (Ctrl+Shift+R).
+Then **restart DSH Web** and **hard-refresh the browser** (Ctrl+Shift+R). The restart is mandatory: a running server computes plugin bundle revisions at startup, so a freshly installed or updated plugin never appears until the server process restarts.
+
+**Verify**
+
+1. Open **Settings** in the DSH Web GUI — an **OMP Advisor** section must be present.
+2. Its **Live status** panel lists sessions with attached advisors once the master switch is on.
+3. First run: enable the master switch, click **Add from preset** (or **+ Add advisor**), pick a model from the dropdown, and start any session — the advisor chip appears in Live status within one turn.
+
+**Upgrade / uninstall**
+
+```bash
+# upgrade: re-run add with the same spec, then restart DSH Web
+dsh plugin --profile web add github:AndrasSama/dsh-omp-advisor
+# uninstall (settings in the dsh-omp-advisor namespace stay on disk)
+dsh plugin --profile web remove dsh-omp-advisor
+```
+
+**Rate-limit guidance.** Each advisor makes one model call per reviewed transcript update. On tight free tiers (e.g. 5 req/min), keep **Review trigger** on `turn`, keep the roster small, and leave **Auto-retry** on with a delay at least as long as the provider's rate window.
+
+### Agent install prompt
+
+Hand this to an AI agent with shell access to the DSH host — it is self-contained:
+
+```text
+Install the dsh-omp-advisor plugin into the DSH web profile.
+
+Context:
+- DSH CLI: `dsh` (must be on PATH; often ~/.npm-global/bin/dsh). Version must be
+  0.1.0-rc.8+. The web profile directory is ~/.dsh/profiles/web (pnpm-managed).
+- `dsh plugin --profile web <cmd>` delegates to pnpm inside that profile dir.
+- A `dsh web` server may currently be RUNNING and hosting live user sessions.
+  NEVER kill it yourself unless the user explicitly says they will restart it;
+  the plugin only activates after a server restart, so finish the install and
+  then ask the user to restart `dsh web` and hard-refresh the browser.
+
+Steps:
+1. Install from GitHub:
+     dsh plugin --profile web add github:AndrasSama/dsh-omp-advisor
+   (or from a local checkout: dsh plugin --profile web add "file:/abs/path/to/dsh-omp-advisor")
+2. Verify it registered:
+     dsh plugin --profile web list | grep dsh-omp-advisor
+   Expect one line showing dsh-omp-advisor.
+3. Sanity-check the installed copy at ~/.dsh/profiles/web/node_modules/dsh-omp-advisor:
+   package.json version matches the release, and lib/index.js + lib/client.js +
+   skills/ exist. KNOWN PITFALL with `file:` installs: pnpm hardlinks files at
+   first install, so later edits to the source checkout can leave the installed
+   copy partially stale. If anything looks stale, mirror the checkout over it:
+     rsync -a --delete --exclude node_modules --exclude .git \
+       /abs/path/to/dsh-omp-advisor/ ~/.dsh/profiles/web/node_modules/dsh-omp-advisor/
+4. Ask the user to restart `dsh web` and hard-refresh the browser (Ctrl+Shift+R).
+5. Post-restart verification in the GUI: Settings shows an "OMP Advisor"
+   section. The plugin is INERT until the user enables "Attach advisors to
+   sessions" (off by default) and adds at least one advisor with a model picked
+   from the DSH model list — tell them this.
+6. If the section is missing after restart: check the server log for plugin
+   load errors, confirm step 2/3, and confirm the browser was hard-refreshed.
+
+Do not edit ~/.dsh/settings.yaml by hand for this plugin; configuration lives
+in the dsh-omp-advisor settings namespace and is edited through the GUI section.
+```
 
 ## Configure
 
