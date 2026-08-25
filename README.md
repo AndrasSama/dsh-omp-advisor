@@ -224,7 +224,7 @@ The plugin packages **250 advisor skills** under [`skills/<id>/SKILL.md`](./skil
 ```bash
 npm install        # dev deps only; DSH packages are runtime-provided
 npm run build      # gen-skills + host ESM (lib/index.js) + client CJS ModuleLoader bundle (lib/client.js)
-npm test           # 100 unit tests over the ported semantics
+npm test           # 101 unit tests over the ported semantics
 npm run typecheck  # tsc --noEmit (DSH packages shimmed)
 ```
 
@@ -248,5 +248,5 @@ The optional sidebar monitor tab integrates with [omdsh-dev/DSH-better-sidebar](
 - No mutating-tool grants for advisors yet (oh-my-pi's WATCHDOG.yml roster). Blocker intervention (opt-in step cancellation) is the first intervention layer; full WATCHDOG grants remain targeted for a later release behind the DSH approval flow.
 - No in-session "advisors watching" badge yet; health is visible in the settings Monitor tab and — with dsh-better-sidebar installed — in the sidebar Advisors tab (status badge included).
 - Status panel polls every 5 s while the settings section is open (sidebar tab: 2 s while registered); no push yet. The activity ring is in-memory only (≤100 events, lost on restart) — monitoring, not audit.
-- **Next up (v0.7.0): advisor memory.** Ecosystem research (deepseek-harness Discussions + the plugin directory) shows memory is a top community demand yet every memory plugin serves the primary agent — no reviewer/advisor model has persistent memory. Planned: per-workspace lesson store (plain markdown/JSONL), deterministic zero-LLM recall + bounded injection into advisor prompts, composing with restore points (rewind lessons) and the completion gate (compromise records), with a user setting choosing the write gate: approval-staged (default) / auto-with-quarantine / read-only.
+- **Next up (v0.7.0): advisor memory.** Ecosystem research (deepseek-harness Discussions + the plugin directory) shows memory is a top community demand yet every memory plugin serves the primary agent — no reviewer/advisor model has persistent memory. Planned: per-workspace lesson store (plain markdown/JSONL), deterministic zero-LLM recall + bounded injection into advisor prompts, composing with restore points (rewind lessons) and the completion gate (compromise records), with a user setting choosing the write gate: approval-staged (default) / auto-with-quarantine / read-only. **Optional backend:** when [OpenViking](https://github.com/volcengine/OpenViking) memory is installed (`@openviking/dsh-memory-plugin`), advisors will be able to recall/store lessons through it as an optional add-on — same runtime-probe pattern as the better-sidebar tab, never a hard dependency, cited here and in the attribution.
 - Web profile UI; other profiles can still configure the namespace by hand.

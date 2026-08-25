@@ -1902,9 +1902,13 @@ test('service e2e: review failure records review-failed + retry events', async (
 
 function sidebarCtx(serviceNow) {
   const effects = []
-  return {
+  const harness = {
+    // Mutable service table; ctx.get reads it like the runtime's optional lookup.
+    provided: { betterSidebar: serviceNow },
     ctx: {
-      betterSidebar: serviceNow,
+      get(name) {
+        return harness.provided[name]
+      },
       connection: { rpc: { call: async () => ({ ok: true, value: { sessions: [], recentEvents: [] } }) } },
       effect: factory => {
         effects.push(factory)
@@ -1923,12 +1927,13 @@ function sidebarCtx(serviceNow) {
       }
     }
   }
+  return harness
 }
 
 test('sidebar probe: registers immediately when the service is already up', () => {
   const harness = sidebarCtx(undefined)
   const service = harness.makeService()
-  harness.ctx.betterSidebar = service
+  harness.provided.betterSidebar = service
   mountAdvisorSidebarTab(harness.ctx)
   const disposers = harness.runEffects()
   assert.equal(service.registered.length, 1)
@@ -1948,7 +1953,7 @@ test('sidebar probe: registers when the service appears after us', async () => {
   const service = harness.makeService()
   assert.equal(service.registered.length, 0)
   // Service appears within the probe window.
-  harness.ctx.betterSidebar = service
+  harness.provided.betterSidebar = service
   await new Promise(resolve => setTimeout(resolve, 1200))
   assert.equal(service.registered.length, 1, 'probe retry picked up the late service')
   for (const dispose of disposers) dispose()
@@ -1962,20 +1967,42 @@ test('sidebar probe: gives up silently when the service never appears', async ()
   // sample mid-window and dispose early (the real give-up is 15 attempts).
   await new Promise(resolve => setTimeout(resolve, 1200))
   for (const dispose of disposers) dispose()
-  harness.ctx.betterSidebar = harness.makeService()
+  const late = harness.makeService()
+  harness.provided.betterSidebar = late
   await new Promise(resolve => setTimeout(resolve, 1200))
-  assert.equal(harness.ctx.betterSidebar.registered.length, 0, 'disposed probe never registers')
+  assert.equal(late.registered.length, 0, 'disposed probe never registers')
 })
 
 test('sidebar probe: hostile registerTab cannot crash the client half', () => {
   const harness = sidebarCtx(undefined)
-  harness.ctx.betterSidebar = {
+  harness.provided.betterSidebar = {
     registerTab: () => {
       throw new Error('already registered')
     }
   }
   mountAdvisorSidebarTab(harness.ctx)
   assert.doesNotThrow(() => harness.runEffects(), 'registration errors are swallowed')
+})
+
+test('sidebar probe: uses ctx.get, never direct property access (v0.6.0 regression)', () => {
+  // The real client runtime REJECTS direct ctx.betterSidebar reads for
+  // undeclared services ("cannot get property without inject") while
+  // ctx.get(name) is the sanctioned optional lookup. Simulate exactly that:
+  // property access throws, get works. The v0.6.0 probe (property read in a
+  // try/catch) silently never registered here; the fixed probe must.
+  const harness = sidebarCtx(undefined)
+  const service = harness.makeService()
+  harness.provided.betterSidebar = service
+  const ctx = new Proxy(harness.ctx, {
+    get(target, prop) {
+      if (prop === 'betterSidebar') throw new Error('cannot get property "betterSidebar" without inject')
+      return Reflect.get(target, prop)
+    }
+  })
+  mountAdvisorSidebarTab(ctx)
+  const disposers = harness.runEffects()
+  assert.equal(service.registered.length, 1, 'probe must go through ctx.get')
+  for (const dispose of disposers) dispose()
 })
 
 test('client entry never hard-injects betterSidebar (would strand the fiber)', async () => {

@@ -7,6 +7,11 @@
  *  - `betterSidebar` is NOT in this module's `inject` list — a name there
  *    strands the browser fiber pending forever when the service never
  *    appears (see src/client/index.ts header). We probe at runtime instead.
+ *  - The probe uses `ctx.get('betterSidebar')` — the client runtime's
+ *    sanctioned OPTIONAL service lookup (dsh-cordis-client-runner: "ctx.get
+ *    performs optional lookup; direct ctx.serviceName access is gated by the
+ *    fiber's inject declaration"). Direct property access is rejected for
+ *    undeclared services, so ctx.get is the only declaration-free read.
  *  - Probe order: try immediately in apply(); if the service is not up yet
  *    (better-sidebar may activate after us), retry once a second for up to
  *    15 attempts, then give up silently. Absent or disabled sidebar ⇒ zero
@@ -342,6 +347,7 @@ export function mountAdvisorSidebarTab(ctx: {
   connection?: ConnectionLike
   effect(factory: () => unknown, label?: string): void
   logger?: { info?(...args: unknown[]): void }
+  get?(name: string): unknown
 }): void {
   ctx.effect(() => {
     let disposed = false
@@ -352,9 +358,17 @@ export function mountAdvisorSidebarTab(ctx: {
 
     const tryRegister = (): boolean => {
       if (disposed) return true
+      // OPTIONAL service lookup via ctx.get — the runtime's sanctioned way to
+      // read a service WITHOUT declaring it in `inject` (dsh-cordis-client-
+      // runner: "ctx.get(name) performs optional lookup; direct ctx.serviceName
+      // access is gated by the fiber's inject declaration"). Direct property
+      // access throws "cannot get property without inject" and would never see
+      // the service; declaring it in inject would strand our whole fiber when
+      // better-sidebar is absent. ctx.get returns undefined until the
+      // providing fiber is active, hence the bounded retry below.
       let service: unknown
       try {
-        service = (ctx as unknown as Record<string, unknown>).betterSidebar
+        service = typeof ctx.get === 'function' ? ctx.get('betterSidebar') : undefined
       } catch {
         return false
       }
