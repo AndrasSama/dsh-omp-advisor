@@ -1485,7 +1485,11 @@ export function createSettingsSection(ctx: ClientCtx): React.ComponentType<{ clo
 
     // Memory tab handlers (v0.7.0): rescan probes engines host-side; approve /
     // discard route one pending lesson through the write gate.
-    const memoryRescan = useCallback(async (): Promise<MemoryView | undefined> => {
+    // NOTE: plain functions, not hooks — they live after the early returns
+    // above, and useCallback there would violate the Rules of Hooks (the
+    // section would crash and render empty). MemoryPanel is not memoized, so
+    // stable identity buys nothing.
+    const memoryRescan = async (): Promise<MemoryView | undefined> => {
       try {
         const result = await ctx.connection.rpc.call('/dsh-omp-advisor', 'memoryRescan', {})
         const value = unwrapRpcResult<{ memory?: MemoryView }>(result, 'memory rescan')
@@ -1495,19 +1499,19 @@ export function createSettingsSection(ctx: ClientCtx): React.ComponentType<{ clo
         setWriteError(String(err instanceof Error ? err.message : err))
         return undefined
       }
-    }, [])
-    const memoryApprove = useCallback((writeId: string): void => {
-      ctx.connection.rpc
+    }
+    const memoryApprove = (writeId: string): void => {
+      void ctx.connection.rpc
         .call('/dsh-omp-advisor', 'memoryApprove', { writeId })
         .then(() => memoryRescan())
         .catch((err: unknown) => setWriteError(String(err instanceof Error ? err.message : err)))
-    }, [])
-    const memoryDiscard = useCallback((writeId: string): void => {
-      ctx.connection.rpc
+    }
+    const memoryDiscard = (writeId: string): void => {
+      void ctx.connection.rpc
         .call('/dsh-omp-advisor', 'memoryDiscard', { writeId })
         .then(() => memoryRescan())
         .catch((err: unknown) => setWriteError(String(err instanceof Error ? err.message : err)))
-    }, [])
+    }
 
     return (
       <div style={styles.root}>
