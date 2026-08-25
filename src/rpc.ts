@@ -72,7 +72,11 @@ export function registerAdvisorRpc(ctx: CordisContextLike, service: AdvisorServi
                 sessions: service.activeSessions().map(sessionId => service.snapshot(sessionId)),
                 // Editor view (non-destructive): the poll must not delete a
                 // card whose name/description the user has cleared mid-edit.
-                settings: service.settingsView
+                settings: service.settingsView,
+                // Additive monitor fields (v0.6.0): workspace matrix rows and
+                // the activity ring. Older clients ignore them.
+                knownWorkspaces: service.knownWorkspaces(),
+                recentEvents: service.recentEvents()
               }
             }
           }

@@ -1,9 +1,12 @@
 /**
- * dsh-omp-advisor browser half: registers the "OMP Advisor" settings section.
+ * dsh-omp-advisor browser half: registers the "OMP Advisor" settings section
+ * and — when dsh-better-sidebar is installed — an "Advisors" monitor tab in
+ * the sidebar workbench (optional runtime probe; see ./sidebar.tsx).
  * Loaded through package.json `dsh.client` (web platform) and wrapped for the
  * DSH ModuleLoader by build.mjs.
  */
 import { createSettingsSection } from './SettingsSection'
+import { mountAdvisorSidebarTab } from './sidebar'
 
 export const name = 'dsh-omp-advisor'
 
@@ -18,6 +21,10 @@ export const name = 'dsh-omp-advisor'
  *              its snapshot is permanently `unavailable` and would hide the
  *              whole section.
  * Exporting package names here strands the fiber pending forever.
+ *
+ * `betterSidebar` (dsh-better-sidebar) is deliberately NOT listed: it is an
+ * OPTIONAL service, and a missing inject name would strand this whole fiber.
+ * sidebar.tsx probes it at runtime instead and no-ops when absent.
  */
 export const inject = ['slots', 'connection']
 
@@ -38,4 +45,7 @@ export function apply(ctx: any): void {
       }),
     'dsh-omp-advisor: settings section'
   )
+
+  // Optional dsh-better-sidebar monitor tab (runtime probe, never a hard dep).
+  mountAdvisorSidebarTab(ctx)
 }

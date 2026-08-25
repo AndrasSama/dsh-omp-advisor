@@ -148,6 +148,32 @@ export interface SessionAdvisorSnapshot {
   restorePoints?: number
 }
 
+/**
+ * One entry in the service-wide activity ring (monitor surfaces). Bounded,
+ * in-memory only — monitoring, not audit. `detail` is plugin-authored text
+ * (never raw model output) and stays clipped.
+ */
+export interface AdvisorEventEntry {
+  time: number
+  kind:
+    | 'review-done'
+    | 'review-failed'
+    | 'retry'
+    | 'quota'
+    | 'halted'
+    | 'backlog-dropped'
+    | 'advice'
+    | 'intervention'
+    | 'continue-sent'
+    | 'restore-point'
+    | 'attach'
+    | 'detach'
+    | (string & {})
+  advisor?: string
+  sessionId?: string
+  detail?: string
+}
+
 /* --------------------------- DSH runtime seams ----------------------------- */
 /* Narrow structural views of the cordis/DSH objects the plugin consumes. */
 

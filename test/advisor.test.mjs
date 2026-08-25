@@ -29,7 +29,8 @@ import {
   pruneRestorePoints,
   markRestorePointAccepted,
   restoreInstructions,
-  commitInstructions
+  commitInstructions,
+  mountAdvisorSidebarTab
 } from './.bundle.mjs'
 
 /* -------------------------------- AdviseGate -------------------------------- */
@@ -465,6 +466,8 @@ function stubService(overrides = {}) {
     setPaused: () => true,
     reviewNow: () => true,
     updateSettings: patch => ({ enabled: true, ...patch }),
+    knownWorkspaces: () => ['/home/u/alpha'],
+    recentEvents: () => [{ time: 1, kind: 'attach', sessionId: 's1' }],
     ...overrides
   }
 }
@@ -506,6 +509,10 @@ test('rpc snapshot returns an RpcResult value, not a raw object', async () => {
   // empty name (user mid-edit) must survive the poll, not be filtered away.
   assert.equal(all.value.settings.advisors.length, 1)
   assert.equal(all.value.settings.advisors[0].name, '')
+  // Additive v0.6.0 monitor fields ride the same aggregate.
+  assert.deepEqual(all.value.knownWorkspaces, ['/home/u/alpha'])
+  assert.equal(all.value.recentEvents.length, 1)
+  assert.equal(all.value.recentEvents[0].kind, 'attach')
   const one = await captured.handler('snapshot', { sessionId: 's9' }, signal)
   assert.equal(one.ok, true)
   assert.equal(one.value.sessionId, 's9')
@@ -1817,4 +1824,165 @@ test('service: pre-mutation listener snapshots then always calls next', SKIP_NO_
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
+})
+
+/* ------------------------- v0.6.0: activity ring + monitor fields ------------------------- */
+
+test('service event ring: bounded, newest-first, detail clipped', () => {
+  const ctx = mockHostCtx({ raw: serviceBaseRaw })
+  const service = new AdvisorService(ctx, {})
+  for (let i = 0; i < 130; i++) {
+    service.recordEvent('review-done', { advisor: `a${i}`, detail: 'x'.repeat(300) })
+  }
+  const events = service.recentEvents()
+  assert.equal(events.length, 100, 'ring is capped at 100')
+  assert.equal(events[0].advisor, 'a129', 'newest first')
+  assert.equal(events[99].advisor, 'a30', 'oldest retained is #30')
+  assert.ok(events[0].detail.length <= 161, 'detail text is clipped')
+  assert.match(events[0].detail, /…$/, 'clipped detail ends with ellipsis')
+})
+
+test('service knownWorkspaces: union of session cwds and advisor patterns, sorted+deduped', () => {
+  const raw = {
+    ...serviceBaseRaw,
+    advisors: [
+      { ...serviceBaseRaw.advisors[0], workspaces: ['/home/u/zeta', 'shared'] },
+      { ...serviceBaseRaw.advisors[0], name: 'second', workspaces: ['shared'] }
+    ]
+  }
+  const ctx = mockHostCtx({ raw })
+  const service = new AdvisorService(ctx, {})
+  ctx.emit('session/created', { id: 's1', header: { cwd: '/home/u/alpha' }, events: [] })
+  ctx.emit('session/created', { id: 's2', header: { cwd: '/home/u/alpha' }, events: [] })
+  assert.deepEqual(service.knownWorkspaces(), ['/home/u/alpha', '/home/u/zeta', 'shared'])
+})
+
+test('service e2e: attach/review-done/advice events land in the ring', async () => {
+  const events = [{ type: 'user/message', data: { content: [{ type: 'text', text: 'do the thing' }] } }]
+  const agent = serviceAgent(events)
+  const llm = scriptedLlm([
+    [{ type: 'tool-call', id: 'c1', name: 'advise', arguments: JSON.stringify({ note: 'looks fine', severity: 'nit' }) }]
+  ])
+  const ctx = mockHostCtx({ raw: serviceBaseRaw, llm, agents: new Map([['s1', agent]]) })
+  const service = new AdvisorService(ctx, {})
+  const session = { id: 's1', header: { cwd: '/tmp/ws' }, events }
+  ctx.emit('session/created', session)
+  ctx.emit('session/event', session, { type: 'turn/end', data: { reason: { kind: 'completed' } } })
+  await new Promise(resolve => setTimeout(resolve, 80))
+
+  const kinds = service.recentEvents().map(entry => entry.kind)
+  assert.ok(kinds.includes('attach'), `attach recorded (got: ${kinds.join(', ')})`)
+  assert.ok(kinds.includes('review-done'), `review-done recorded (got: ${kinds.join(', ')})`)
+  assert.ok(kinds.includes('advice'), `advice recorded (got: ${kinds.join(', ')})`)
+  const advice = service.recentEvents().find(entry => entry.kind === 'advice')
+  assert.match(advice.detail, /nit · inject/)
+  const review = service.recentEvents().find(entry => entry.kind === 'review-done')
+  assert.match(review.detail, /^\d+ms$/)
+})
+
+test('service e2e: review failure records review-failed + retry events', async () => {
+  const events = [{ type: 'user/message', data: { content: [{ type: 'text', text: 'do the thing' }] } }]
+  const agent = serviceAgent(events)
+  const llm = { stream: () => { throw new Error('503 gateway overloaded') } }
+  const raw = { ...serviceBaseRaw, autoRetry: true, autoRetryDelayMs: 1000, autoRetryMax: 2 }
+  const ctx = mockHostCtx({ raw, llm, agents: new Map([['s1', agent]]) })
+  const service = new AdvisorService(ctx, {})
+  const session = { id: 's1', header: { cwd: '/tmp/ws' }, events }
+  ctx.emit('session/created', session)
+  ctx.emit('session/event', session, { type: 'turn/end', data: { reason: { kind: 'completed' } } })
+  await new Promise(resolve => setTimeout(resolve, 60))
+
+  const kinds = service.recentEvents().map(entry => entry.kind)
+  assert.ok(kinds.includes('review-failed'), `review-failed recorded (got: ${kinds.join(', ')})`)
+  assert.ok(kinds.includes('retry'), `retry recorded (got: ${kinds.join(', ')})`)
+})
+
+/* --------------------- v0.6.0: optional better-sidebar integration --------------------- */
+
+function sidebarCtx(serviceNow) {
+  const effects = []
+  return {
+    ctx: {
+      betterSidebar: serviceNow,
+      connection: { rpc: { call: async () => ({ ok: true, value: { sessions: [], recentEvents: [] } }) } },
+      effect: factory => {
+        effects.push(factory)
+      },
+      logger: { info: () => {} }
+    },
+    runEffects: () => effects.map(factory => factory()),
+    makeService() {
+      const registered = []
+      return {
+        registered,
+        registerTab: descriptor => {
+          registered.push(descriptor)
+          return () => {}
+        }
+      }
+    }
+  }
+}
+
+test('sidebar probe: registers immediately when the service is already up', () => {
+  const harness = sidebarCtx(undefined)
+  const service = harness.makeService()
+  harness.ctx.betterSidebar = service
+  mountAdvisorSidebarTab(harness.ctx)
+  const disposers = harness.runEffects()
+  assert.equal(service.registered.length, 1)
+  const descriptor = service.registered[0]
+  assert.equal(descriptor.id, 'omp-advisor:advisors')
+  assert.equal(descriptor.single, true)
+  assert.equal(typeof descriptor.component, 'function')
+  assert.equal(typeof descriptor.badge, 'function')
+  assert.equal(descriptor.badge(), null, 'no badge while no advisors are cached')
+  for (const dispose of disposers) dispose()
+})
+
+test('sidebar probe: registers when the service appears after us', async () => {
+  const harness = sidebarCtx(undefined)
+  mountAdvisorSidebarTab(harness.ctx)
+  const disposers = harness.runEffects()
+  const service = harness.makeService()
+  assert.equal(service.registered.length, 0)
+  // Service appears within the probe window.
+  harness.ctx.betterSidebar = service
+  await new Promise(resolve => setTimeout(resolve, 1200))
+  assert.equal(service.registered.length, 1, 'probe retry picked up the late service')
+  for (const dispose of disposers) dispose()
+})
+
+test('sidebar probe: gives up silently when the service never appears', async () => {
+  const harness = sidebarCtx(undefined)
+  mountAdvisorSidebarTab(harness.ctx)
+  const disposers = harness.runEffects()
+  // Nothing to assert but "no crash and no registration" after the window;
+  // sample mid-window and dispose early (the real give-up is 15 attempts).
+  await new Promise(resolve => setTimeout(resolve, 1200))
+  for (const dispose of disposers) dispose()
+  harness.ctx.betterSidebar = harness.makeService()
+  await new Promise(resolve => setTimeout(resolve, 1200))
+  assert.equal(harness.ctx.betterSidebar.registered.length, 0, 'disposed probe never registers')
+})
+
+test('sidebar probe: hostile registerTab cannot crash the client half', () => {
+  const harness = sidebarCtx(undefined)
+  harness.ctx.betterSidebar = {
+    registerTab: () => {
+      throw new Error('already registered')
+    }
+  }
+  mountAdvisorSidebarTab(harness.ctx)
+  assert.doesNotThrow(() => harness.runEffects(), 'registration errors are swallowed')
+})
+
+test('client entry never hard-injects betterSidebar (would strand the fiber)', async () => {
+  const { readFileSync } = await import('node:fs')
+  const source = readFileSync(new URL('../src/client/index.ts', import.meta.url), 'utf8')
+  const match = source.match(/export const inject = \[([^\]]*)\]/)
+  assert.ok(match, 'client entry exports an inject list')
+  const names = match[1].split(',').map(part => part.trim().replace(/['"]/g, '')).filter(Boolean)
+  assert.ok(!names.includes('betterSidebar'), `inject must stay optional-probe only, got: ${names.join(', ')}`)
+  assert.ok(names.includes('slots') && names.includes('connection'))
 })

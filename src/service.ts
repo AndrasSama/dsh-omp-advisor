@@ -15,7 +15,7 @@ import {
   normalizeSettings,
   normalizeSettingsLenient
 } from './settings'
-import type { AdvisorSettings, CordisContextLike, SessionAdvisorSnapshot, SessionLike } from './types'
+import type { AdvisorEventEntry, AdvisorSettings, CordisContextLike, SessionAdvisorSnapshot, SessionLike } from './types'
 
 export const SERVICE_NAME = 'dsh-omp-advisor'
 
@@ -25,6 +25,10 @@ const MUTATION_TOOLS: ReadonlySet<string> = new Set(['bash', 'write', 'edit'])
 const MUTATION_SNAPSHOT_WAIT_MS = 3000
 /** Min gap between mutation-triggered snapshots per session. */
 const MUTATION_SNAPSHOT_THROTTLE_MS = 2000
+/** Activity ring bound (monitor surfaces read newest-first). */
+const EVENT_RING_LIMIT = 100
+/** Clip for event detail text (plugin-authored, still kept short). */
+const EVENT_DETAIL_LIMIT = 160
 
 function sessionIdOf(session: SessionLike): string {
   return String(session.id)
@@ -52,6 +56,8 @@ export class AdvisorService extends Service {
   private lastMutationSnapshot = new Map<string, number>()
   /** Live restore-point counts per session for the snapshot surface. */
   private restorePointCounts = new Map<string, number>()
+  /** Service-wide activity ring for the monitor surfaces (bounded, in-memory). */
+  private events: AdvisorEventEntry[] = []
   private settingsValue: AdvisorSettings
   private settingsScope: {
     get(): unknown
@@ -159,6 +165,50 @@ export class AdvisorService extends Service {
   }
 
   /**
+   * Append one activity entry to the bounded ring (monitor surfaces read it
+   * newest-first). Detail text is plugin-authored and clipped; entries are
+   * in-memory only and lost on restart — monitoring, not audit.
+   */
+  recordEvent(kind: string, fields?: { advisor?: string; sessionId?: string; detail?: string }): void {
+    const detail = fields?.detail
+    this.events.push({
+      time: Date.now(),
+      kind,
+      ...(fields?.advisor ? { advisor: fields.advisor } : {}),
+      ...(fields?.sessionId ? { sessionId: fields.sessionId } : {}),
+      ...(detail
+        ? { detail: detail.length > EVENT_DETAIL_LIMIT ? `${detail.slice(0, EVENT_DETAIL_LIMIT)}…` : detail }
+        : {})
+    })
+    if (this.events.length > EVENT_RING_LIMIT) {
+      this.events.splice(0, this.events.length - EVENT_RING_LIMIT)
+    }
+  }
+
+  /** Activity ring, newest first (for the monitor surfaces). */
+  recentEvents(): AdvisorEventEntry[] {
+    return [...this.events].reverse()
+  }
+
+  /**
+   * Workspaces the matrix can offer: union of live session cwds and every
+   * pattern currently configured on any advisor (so patterns for workspaces
+   * not open in a session stay visible/editable). Sorted + deduped.
+   */
+  knownWorkspaces(): string[] {
+    const known = new Set<string>()
+    for (const cwd of this.sessionCwds.values()) {
+      if (cwd) known.add(cwd)
+    }
+    for (const entry of this.settingsValue.advisors) {
+      for (const pattern of entry.workspaces ?? []) {
+        if (pattern) known.add(pattern)
+      }
+    }
+    return [...known].sort((a, b) => a.localeCompare(b))
+  }
+
+  /**
    * Merge a partial settings patch through the Host settings domain
    * (schema-resolved, validated, watchers notified — the same path the
    * settings document uses everywhere else) and answer the resolved value.
@@ -212,6 +262,10 @@ export class AdvisorService extends Service {
           await pruneRestorePoints(cwd, this.settingsValue.restorePointKeep || 20, id)
           const count = this.restorePointCounts.get(id) ?? 0
           this.restorePointCounts.set(id, Math.min(count + 1, this.settingsValue.restorePointKeep || 20))
+          this.recordEvent('restore-point', {
+            sessionId: id,
+            detail: `${label} · ${point.sha.slice(0, 7)}`
+          })
         }
       } catch (err) {
         this.hostCtx.logger?.debug?.(`${SERVICE_NAME}: restore point failed`, {
@@ -250,7 +304,9 @@ export class AdvisorService extends Service {
             content: [{ type: 'text', text }],
             source: { kind: 'plugin', plugin: SERVICE_NAME }
           }),
-        log: (message, meta) => ctx.logger?.debug?.(`${SERVICE_NAME}: ${message}`, meta ?? {})
+        log: (message, meta) => ctx.logger?.debug?.(`${SERVICE_NAME}: ${message}`, meta ?? {}),
+        recordEvent: (kind, advisor, detail) =>
+          this.recordEvent(kind, { advisor, sessionId: id, ...(detail ? { detail } : {}) })
       },
       this.scopedSettings(this.settingsValue, cwd),
       (text: string) =>
@@ -260,6 +316,7 @@ export class AdvisorService extends Service {
         })
     )
     this.runtimes.set(id, runtime)
+    this.recordEvent('attach', { sessionId: id, detail: cwd })
   }
 
   private onSessionEvent(session: SessionLike, event: { type: string; data?: unknown }): void {
@@ -295,6 +352,7 @@ export class AdvisorService extends Service {
     if (!runtime) return
     runtime.dispose()
     this.runtimes.delete(sessionId)
+    this.recordEvent('detach', { sessionId })
   }
 
   /** Snapshot one session's advisor state for the RPC surface. */

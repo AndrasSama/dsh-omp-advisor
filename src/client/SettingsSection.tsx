@@ -58,9 +58,20 @@ interface AdvisorStatusView {
   lastError?: string
 }
 
+interface EventEntryView {
+  time: number
+  kind: string
+  advisor?: string
+  sessionId?: string
+  detail?: string
+}
+
 interface SnapshotView {
   sessions?: { sessionId: string; active: boolean; advisors: AdvisorStatusView[]; restorePoints?: number }[]
   settings: SettingsView
+  /** Additive v0.6.0 monitor fields — optional: an older host omits them. */
+  knownWorkspaces?: string[]
+  recentEvents?: EventEntryView[]
 }
 
 interface ClientCtx {
@@ -139,6 +150,46 @@ const styles: Record<string, React.CSSProperties> = {
     font: 'inherit',
     minHeight: 54,
     resize: 'vertical'
+  },
+  /* Inner tab bar, pattern-matched to the Plugin Market's sub-tab row. */
+  tabBar: {
+    display: 'flex',
+    gap: 2,
+    borderBottom: '1px solid var(--dsh-border, rgba(128,128,128,0.25))',
+    flexWrap: 'wrap'
+  },
+  tabButton: {
+    border: 'none',
+    borderBottom: '2px solid transparent',
+    background: 'transparent',
+    color: 'inherit',
+    opacity: 0.7,
+    padding: '8px 14px',
+    cursor: 'pointer',
+    font: 'inherit',
+    fontWeight: 500
+  },
+  tabButtonActive: {
+    opacity: 1,
+    borderBottom: '2px solid var(--dsh-accent, #4d6bfe)',
+    color: 'var(--dsh-accent, #4d6bfe)'
+  },
+  /* Collapsible advisor card header (always visible). */
+  cardHeader: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 10,
+    cursor: 'pointer',
+    flexWrap: 'wrap'
+  },
+  chevron: {
+    border: 'none',
+    background: 'transparent',
+    color: 'inherit',
+    cursor: 'pointer',
+    font: 'inherit',
+    padding: '0 4px',
+    opacity: 0.7
   }
 }
 
@@ -206,6 +257,8 @@ interface AdvisorCardProps {
   entry: AdvisorEntryView
   index: number
   catalog: ModelCatalog | null
+  collapsed: boolean
+  onToggleCollapse(index: number): void
   onPatch(index: number, patch: Partial<AdvisorEntryView>): void
   onRemove(index: number): void
 }
@@ -214,6 +267,8 @@ const AdvisorCard = React.memo(function AdvisorCard({
   entry,
   index,
   catalog,
+  collapsed,
+  onToggleCollapse,
   onPatch,
   onRemove
 }: AdvisorCardProps) {
@@ -222,6 +277,8 @@ const AdvisorCard = React.memo(function AdvisorCard({
   const efforts = model?.efforts ?? []
   const skills = entry.skills ?? []
   const preset = entry.preset ? findPreset(entry.preset) : undefined
+  const incomplete = !entry.provider || !entry.model
+  const workspaceCount = entry.workspaces?.length ?? 0
 
   const providerOptions = useMemo(
     () =>
@@ -273,167 +330,410 @@ const AdvisorCard = React.memo(function AdvisorCard({
         gap: 8
       }}
     >
-      <div style={styles.row}>
+      {/* Header: always visible. Click anywhere on it (except the controls)
+          to expand/collapse; cards are collapsed by default. */}
+      <div
+        style={styles.cardHeader}
+        onClick={() => onToggleCollapse(index)}
+        title={collapsed ? 'Expand this advisor' : 'Collapse this advisor'}
+      >
+        <button style={styles.chevron} tabIndex={-1}>
+          {collapsed ? '▸' : '▾'}
+        </button>
         <input
           type="checkbox"
           checked={entry.enabled !== false}
           onChange={event => onPatch(index, { enabled: event.target.checked })}
+          onClick={event => event.stopPropagation()}
           title="Enable this advisor"
         />
         <input
           style={{ ...styles.input, width: 160 }}
           value={entry.name}
           placeholder="advisor name"
+          onClick={event => event.stopPropagation()}
           onChange={event => onPatch(index, { name: event.target.value })}
         />
-        <select
-          style={styles.select}
-          value={entry.provider}
-          onChange={event => {
-            const nextGroup = catalog?.groups.find(item => item.id === event.target.value)
-            onPatch(index, {
-              provider: event.target.value,
-              model: nextGroup?.models[0]?.id ?? '',
-              reasoningEffort: undefined
-            })
+        {collapsed && (
+          <span style={styles.hint}>
+            {incomplete
+              ? '— no model yet —'
+              : `${entry.provider} / ${model?.name || entry.model}`}
+          </span>
+        )}
+        <span style={styles.chip} title="Workspace patterns (empty = every session)">
+          {workspaceCount === 0 ? 'all workspaces' : `${workspaceCount} workspace${workspaceCount > 1 ? 's' : ''}`}
+        </span>
+        <span style={styles.chip} title="Skills attached to this advisor">
+          {skills.length} skills
+        </span>
+        {incomplete && (
+          <span style={{ ...styles.hint, color: 'rgb(220,160,90)' }} title="Pick a provider and model before this advisor can run">
+            ⚠ needs model
+          </span>
+        )}
+        <span style={{ flex: 1 }} />
+        <button
+          style={styles.dangerButton}
+          onClick={event => {
+            event.stopPropagation()
+            onRemove(index)
           }}
         >
-          <option value="">— provider —</option>
-          {providerOptions}
-        </select>
-        <select
-          style={styles.select}
-          value={entry.model}
-          onChange={event => onPatch(index, { model: event.target.value, reasoningEffort: undefined })}
-        >
-          <option value="">— model —</option>
-          {modelOptions}
-        </select>
-        {efforts.length > 0 && (
-          <select
-            style={styles.select}
-            value={entry.reasoningEffort ?? ''}
-            onChange={event => onPatch(index, { reasoningEffort: event.target.value || undefined })}
-            title="Reasoning effort"
-          >
-            <option value="">default effort</option>
-            {effortOptions}
-          </select>
-        )}
-        <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-          max turns
-          <input
-            type="number"
-            min={1}
-            max={10}
-            style={{ ...styles.input, width: 60 }}
-            value={entry.maxTurns}
-            onChange={event => {
-              const parsed = Number.parseInt(event.target.value, 10)
-              if (Number.isFinite(parsed)) {
-                onPatch(index, { maxTurns: Math.min(10, Math.max(1, parsed)) })
-              }
-            }}
-          />
-        </label>
-        <button style={styles.dangerButton} onClick={() => onRemove(index)}>
           remove
         </button>
       </div>
-      <textarea
-        style={styles.textarea}
-        placeholder="Optional specialization, e.g. 'Focus on security: injection, secrets, unsafe deserialization.'"
-        value={entry.instructions ?? ''}
-        onChange={event => onPatch(index, { instructions: event.target.value })}
-      />
-      <div style={styles.row}>
-        <span style={{ ...styles.hint, minWidth: 150 }}>Workspaces</span>
-        <WorkspacesInput
-          value={entry.workspaces ?? []}
-          onCommit={next => onPatch(index, { workspaces: next })}
-        />
-      </div>
-      <div style={styles.row}>
-        <span style={{ ...styles.hint, minWidth: 150 }} />
-        <span style={styles.hint}>
-          Comma-separated substrings matched against the session's workspace path; this advisor only
-          runs in matching sessions. Leave empty for every session.
-        </span>
-      </div>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-        <div style={styles.row}>
-          <span style={{ ...styles.hint, minWidth: 150 }}>Skills ({skills.length})</span>
-          <select
-            style={{ ...styles.select, maxWidth: 260 }}
-            value={entry.skillMode === 'lazy' ? 'lazy' : 'inject'}
-            title="inject = embed full skill bodies in the system prompt; lazy = id+description index plus a load_skill tool (saves tokens, costs one extra call per loaded skill)"
-            onChange={event =>
-              onPatch(index, { skillMode: event.target.value === 'lazy' ? 'lazy' : 'inject' })
-            }
-          >
-            <option value="inject">inject full bodies into prompt</option>
-            <option value="lazy">lazy — load_skill on demand</option>
-          </select>
-          {preset && (
-            <>
-              <span style={styles.hint}>preset: {preset.name}</span>
-              <button
-                style={styles.button}
-                title={`Restore the ${skills.length ? 'curated' : ''} skill list of ${preset.name}`}
-                onClick={() => onPatch(index, { skills: [...preset.skills] })}
+      {!collapsed && (
+        <>
+          <div style={styles.row}>
+            <select
+              style={styles.select}
+              value={entry.provider}
+              onChange={event => {
+                const nextGroup = catalog?.groups.find(item => item.id === event.target.value)
+                onPatch(index, {
+                  provider: event.target.value,
+                  model: nextGroup?.models[0]?.id ?? '',
+                  reasoningEffort: undefined
+                })
+              }}
+            >
+              <option value="">— provider —</option>
+              {providerOptions}
+            </select>
+            <select
+              style={styles.select}
+              value={entry.model}
+              onChange={event => onPatch(index, { model: event.target.value, reasoningEffort: undefined })}
+            >
+              <option value="">— model —</option>
+              {modelOptions}
+            </select>
+            {efforts.length > 0 && (
+              <select
+                style={styles.select}
+                value={entry.reasoningEffort ?? ''}
+                onChange={event => onPatch(index, { reasoningEffort: event.target.value || undefined })}
+                title="Reasoning effort"
               >
-                reset to preset defaults
-              </button>
-            </>
-          )}
-        </div>
-        {skills.length > 0 && (
-          <div style={{ ...styles.row, gap: 6 }}>
-            {skills.map(skillId => {
-              const meta = SKILL_CATALOG.find(item => item.id === skillId)
-              return (
-                <span
-                  key={skillId}
-                  style={styles.chip}
-                  title={meta?.description ?? 'Not packaged with this plugin version'}
-                >
-                  {skillId}
-                  <button
-                    style={{
-                      border: 'none',
-                      background: 'transparent',
-                      color: 'inherit',
-                      cursor: 'pointer',
-                      padding: 0,
-                      font: 'inherit',
-                      lineHeight: 1
-                    }}
-                    title="Remove this skill"
-                    onClick={() => onPatch(index, { skills: skills.filter(id => id !== skillId) })}
-                  >
-                    ×
-                  </button>
-                </span>
-              )
-            })}
+                <option value="">default effort</option>
+                {effortOptions}
+              </select>
+            )}
+            <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+              max turns
+              <input
+                type="number"
+                min={1}
+                max={10}
+                style={{ ...styles.input, width: 60 }}
+                value={entry.maxTurns}
+                onChange={event => {
+                  const parsed = Number.parseInt(event.target.value, 10)
+                  if (Number.isFinite(parsed)) {
+                    onPatch(index, { maxTurns: Math.min(10, Math.max(1, parsed)) })
+                  }
+                }}
+              />
+            </label>
           </div>
-        )}
-        <select
-          style={styles.select}
-          value=""
-          onChange={event => {
-            if (event.target.value) {
-              onPatch(index, { skills: [...skills, event.target.value] })
-            }
-          }}
-        >
-          <option value="">+ add packaged skill…</option>
-          {skillOptions}
-        </select>
-      </div>
+          <textarea
+            style={styles.textarea}
+            placeholder="Optional specialization, e.g. 'Focus on security: injection, secrets, unsafe deserialization.'"
+            value={entry.instructions ?? ''}
+            onChange={event => onPatch(index, { instructions: event.target.value })}
+          />
+          <div style={styles.row}>
+            <span style={{ ...styles.hint, minWidth: 150 }}>Workspaces</span>
+            <WorkspacesInput
+              value={entry.workspaces ?? []}
+              onCommit={next => onPatch(index, { workspaces: next })}
+            />
+          </div>
+          <div style={styles.row}>
+            <span style={{ ...styles.hint, minWidth: 150 }} />
+            <span style={styles.hint}>
+              Comma-separated substrings matched against the session's workspace path; this advisor only
+              runs in matching sessions. Leave empty for every session. The Workspaces tab offers a
+              per-workspace toggle matrix over the same field.
+            </span>
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <div style={styles.row}>
+              <span style={{ ...styles.hint, minWidth: 150 }}>Skills ({skills.length})</span>
+              <select
+                style={{ ...styles.select, maxWidth: 260 }}
+                value={entry.skillMode === 'lazy' ? 'lazy' : 'inject'}
+                title="inject = embed full skill bodies in the system prompt; lazy = id+description index plus a load_skill tool (saves tokens, costs one extra call per loaded skill)"
+                onChange={event =>
+                  onPatch(index, { skillMode: event.target.value === 'lazy' ? 'lazy' : 'inject' })
+                }
+              >
+                <option value="inject">inject full bodies into prompt</option>
+                <option value="lazy">lazy — load_skill on demand</option>
+              </select>
+              {preset && (
+                <>
+                  <span style={styles.hint}>preset: {preset.name}</span>
+                  <button
+                    style={styles.button}
+                    title={`Restore the ${skills.length ? 'curated' : ''} skill list of ${preset.name}`}
+                    onClick={() => onPatch(index, { skills: [...preset.skills] })}
+                  >
+                    reset to preset defaults
+                  </button>
+                </>
+              )}
+            </div>
+            {skills.length > 0 && (
+              <div style={{ ...styles.row, gap: 6 }}>
+                {skills.map(skillId => {
+                  const meta = SKILL_CATALOG.find(item => item.id === skillId)
+                  return (
+                    <span
+                      key={skillId}
+                      style={styles.chip}
+                      title={meta?.description ?? 'Not packaged with this plugin version'}
+                    >
+                      {skillId}
+                      <button
+                        style={{
+                          border: 'none',
+                          background: 'transparent',
+                          color: 'inherit',
+                          cursor: 'pointer',
+                          padding: 0,
+                          font: 'inherit',
+                          lineHeight: 1
+                        }}
+                        title="Remove this skill"
+                        onClick={() => onPatch(index, { skills: skills.filter(id => id !== skillId) })}
+                      >
+                        ×
+                      </button>
+                    </span>
+                  )
+                })}
+              </div>
+            )}
+            <select
+              style={styles.select}
+              value=""
+              onChange={event => {
+                if (event.target.value) {
+                  onPatch(index, { skills: [...skills, event.target.value] })
+                }
+              }}
+            >
+              <option value="">+ add packaged skill…</option>
+              {skillOptions}
+            </select>
+          </div>
+        </>
+      )}
     </div>
   )
 })
+
+/* ------------------------- workspaces × advisor matrix ------------------------ */
+/*
+ * Per-workspace activation matrix over the same `workspaces` field the card
+ * editor writes (substring patterns matched against the session cwd). Rows
+ * are the union the host reports (live session cwds + configured patterns)
+ * plus patterns added in this dialog that no advisor holds yet. An advisor
+ * with an empty list runs everywhere: its cells render indeterminate, and
+ * checking one scopes it to that single workspace.
+ */
+
+interface WorkspacesMatrixProps {
+  advisors: AdvisorEntryView[]
+  knownWorkspaces: string[]
+  onPatchAdvisor(index: number, patch: Partial<AdvisorEntryView>): void
+}
+
+function WorkspacesMatrix({ advisors, knownWorkspaces, onPatchAdvisor }: WorkspacesMatrixProps): React.ReactElement {
+  const [pending, setPending] = useState<string[]>([])
+  const [draft, setDraft] = useState('')
+
+  // Rows: host-known workspaces plus locally added patterns not yet held by
+  // any advisor (they persist once a checkbox writes them into one).
+  const configured = new Set(advisors.flatMap(entry => entry.workspaces ?? []))
+  const rows = [...new Set([...knownWorkspaces, ...pending])].filter(
+    workspace => knownWorkspaces.includes(workspace) || !configured.has(workspace)
+  )
+
+  const toggle = (advisorIndex: number, workspace: string, checked: boolean): void => {
+    const entry = advisors[advisorIndex]
+    if (!entry) return
+    const current = entry.workspaces ?? []
+    if (checked) {
+      if (current.includes(workspace)) return
+      onPatchAdvisor(advisorIndex, { workspaces: [...current, workspace] })
+    } else {
+      onPatchAdvisor(advisorIndex, { workspaces: current.filter(item => item !== workspace) })
+    }
+  }
+
+  const addPattern = (): void => {
+    const pattern = draft.trim()
+    if (!pattern) return
+    setPending(current => (current.includes(pattern) || knownWorkspaces.includes(pattern) ? current : [...current, pattern]))
+    setDraft('')
+  }
+
+  return (
+    <div style={styles.card}>
+      <div style={styles.row}>
+        <strong>Workspaces</strong>
+        <span style={styles.hint}>
+          Which advisor runs in which workspace. A checked cell means the workspace pattern is in that
+          advisor's list; an advisor with no patterns runs everywhere (indeterminate cells — checking one
+          scopes it to that single workspace).
+        </span>
+      </div>
+      {advisors.length === 0 ? (
+        <span style={styles.hint}>No advisors yet — add one in the Advisors tab first.</span>
+      ) : rows.length === 0 ? (
+        <span style={styles.hint}>
+          No workspaces seen yet. Start a session in a workspace and it appears here, or add a pattern below.
+        </span>
+      ) : (
+        <div style={{ overflowX: 'auto' }}>
+          <table style={{ borderCollapse: 'collapse', width: '100%', font: 'inherit' }}>
+            <thead>
+              <tr>
+                <th style={{ textAlign: 'left', padding: '4px 8px', opacity: 0.7, fontWeight: 500 }}>Workspace</th>
+                {advisors.map((entry, index) => (
+                  <th key={index} style={{ textAlign: 'center', padding: '4px 8px', opacity: 0.7, fontWeight: 500 }}>
+                    {entry.name || `advisor ${index + 1}`}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map(workspace => {
+                const basename = workspace.split('/').filter(Boolean).pop() ?? workspace
+                const seen = knownWorkspaces.includes(workspace)
+                return (
+                  <tr key={workspace}>
+                    <td style={{ padding: '4px 8px', borderTop: '1px solid var(--dsh-border, rgba(128,128,128,0.15))' }}>
+                      <span title={workspace} style={{ fontWeight: 600 }}>{basename}</span>
+                      {basename !== workspace && (
+                        <span style={{ ...styles.hint, marginLeft: 6 }}>{workspace}</span>
+                      )}
+                      {!seen && (
+                        <span style={{ ...styles.hint, marginLeft: 6 }} title="Configured on an advisor but not open in any session right now">
+                          (not seen yet)
+                        </span>
+                      )}
+                    </td>
+                    {advisors.map((entry, advisorIndex) => {
+                      const list = entry.workspaces ?? []
+                      const everywhere = list.length === 0
+                      const checked = list.includes(workspace)
+                      return (
+                        <td
+                          key={advisorIndex}
+                          style={{ textAlign: 'center', padding: '4px 8px', borderTop: '1px solid var(--dsh-border, rgba(128,128,128,0.15))' }}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            ref={element => {
+                              if (element) element.indeterminate = everywhere && !checked
+                            }}
+                            title={
+                              everywhere
+                                ? 'Runs in every workspace — check to scope this advisor to only this workspace'
+                                : checked
+                                  ? 'Uncheck to remove this workspace from the advisor'
+                                  : 'Check to add this workspace to the advisor'
+                            }
+                            onChange={event => toggle(advisorIndex, workspace, event.target.checked)}
+                          />
+                        </td>
+                      )
+                    })}
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+      <div style={styles.row}>
+        <input
+          style={{ ...styles.input, flex: 1, minWidth: 220 }}
+          placeholder="Add a workspace pattern (path or substring)…"
+          value={draft}
+          onChange={event => setDraft(event.target.value)}
+          onKeyDown={event => {
+            if (event.key === 'Enter') addPattern()
+          }}
+        />
+        <button style={styles.button} onClick={addPattern}>
+          Add row
+        </button>
+        <span style={styles.hint}>Then tick the advisors that should run there.</span>
+      </div>
+    </div>
+  )
+}
+
+/* --------------------------------- event feed -------------------------------- */
+
+const EVENT_KIND_COLORS: Record<string, string> = {
+  advice: '#4caf7d',
+  'review-done': '#7da7d9',
+  'review-failed': '#dc7070',
+  retry: '#c9a227',
+  quota: '#e08a3c',
+  halted: '#dc5050',
+  intervention: '#dc5050',
+  'restore-point': '#9a7fd1',
+  'continue-sent': '#c9a227',
+  'backlog-dropped': '#e08a3c',
+  attach: '#8a8a8a',
+  detach: '#8a8a8a'
+}
+
+function formatEventTime(time: number): string {
+  const date = new Date(time)
+  const pad = (value: number): string => String(value).padStart(2, '0')
+  return `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
+}
+
+function EventFeed(props: { events: EventEntryView[] }): React.ReactElement {
+  if (props.events.length === 0) {
+    return <span style={styles.hint}>No advisor activity yet this server run.</span>
+  }
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 4, maxHeight: 320, overflowY: 'auto' }}>
+      <strong style={{ marginTop: 6 }}>Activity</strong>
+      {props.events.map((event, index) => (
+        <div key={`${event.time}-${index}`} style={{ ...styles.row, gap: 8 }}>
+          <span style={{ ...styles.hint, fontVariantNumeric: 'tabular-nums' }}>{formatEventTime(event.time)}</span>
+          <span
+            style={{
+              ...styles.chip,
+              borderColor: EVENT_KIND_COLORS[event.kind] ?? 'var(--dsh-border, rgba(128,128,128,0.25))',
+              color: EVENT_KIND_COLORS[event.kind] ?? 'inherit'
+            }}
+          >
+            {event.kind}
+          </span>
+          {event.advisor && <span style={{ fontWeight: 600 }}>{event.advisor}</span>}
+          {event.sessionId && (
+            <span style={styles.hint} title={event.sessionId}>
+              {event.sessionId.slice(0, 8)}
+            </span>
+          )}
+          {event.detail && <span style={styles.hint}>{event.detail}</span>}
+        </div>
+      ))}
+    </div>
+  )
+}
 
 /* --------------------------------- component -------------------------------- */
 
@@ -457,6 +757,10 @@ export function createSettingsSection(ctx: ClientCtx): React.ComponentType<{ clo
     const [writeError, setWriteError] = useState<string | null>(null)
     const [catalog, setCatalog] = useState<ModelCatalog | null>(null)
     const [catalogError, setCatalogError] = useState<string | null>(null)
+    // Inner tab (market-style sub-tab bar). Component-local, default General.
+    const [tab, setTab] = useState<'general' | 'advisors' | 'workspaces' | 'monitor'>('general')
+    // Expanded advisor cards (collapsed by default); per dialog-open lifetime.
+    const [expanded, setExpanded] = useState<Set<number>>(() => new Set())
 
     const viewRef = useRef<SnapshotView | null>(null)
     viewRef.current = view
@@ -502,8 +806,18 @@ export function createSettingsSection(ctx: ClientCtx): React.ComponentType<{ clo
             if (cancelled) return
             setPhase('ready')
             if (pendingRef.current > 0 || draftRef.current !== null) {
-              // Editing: keep the live status fresh, leave settings alone.
-              setView(current => (current ? { ...current, sessions: value.sessions } : value))
+              // Editing: keep live data fresh (status, monitor fields),
+              // leave the settings form alone.
+              setView(current =>
+                current
+                  ? {
+                      ...current,
+                      sessions: value.sessions,
+                      knownWorkspaces: value.knownWorkspaces,
+                      recentEvents: value.recentEvents
+                    }
+                  : value
+              )
               return
             }
             settledSettingsRef.current = value.settings
@@ -609,6 +923,23 @@ export function createSettingsSection(ctx: ClientCtx): React.ComponentType<{ clo
       [write]
     )
 
+    const toggleCollapse = useCallback((index: number) => {
+      setExpanded(current => {
+        const next = new Set(current)
+        if (next.has(index)) next.delete(index)
+        else next.add(index)
+        return next
+      })
+    }, [])
+
+    const expandIndex = (index: number): void => {
+      setExpanded(current => {
+        const next = new Set(current)
+        next.add(index)
+        return next
+      })
+    }
+
     const addAdvisor = useCallback(() => {
       const firstGroup = catalog?.groups.find(group => group.models.length > 0)
       const firstModel = firstGroup?.models[0]
@@ -616,6 +947,7 @@ export function createSettingsSection(ctx: ClientCtx): React.ComponentType<{ clo
       let name = 'advisor'
       let suffix = 2
       while (baseNames.has(name)) name = `advisor-${suffix++}`
+      expandIndex(advisors.length)
       write('advisors', [
         ...advisors,
         {
@@ -638,6 +970,7 @@ export function createSettingsSection(ctx: ClientCtx): React.ComponentType<{ clo
         let name = preset.name
         let suffix = 2
         while (baseNames.has(name)) name = `${preset.name} ${suffix++}`
+        expandIndex(advisors.length)
         write('advisors', [
           ...advisors,
           {
@@ -673,9 +1006,28 @@ export function createSettingsSection(ctx: ClientCtx): React.ComponentType<{ clo
 
     const severities = value.interruptSeverities ?? ['concern', 'blocker']
 
+    const tabs = [
+      { id: 'general' as const, label: 'General' },
+      { id: 'advisors' as const, label: `Advisors (${advisors.length})` },
+      { id: 'workspaces' as const, label: 'Workspaces' },
+      { id: 'monitor' as const, label: 'Monitor' }
+    ]
+
     return (
       <div style={styles.root}>
         {writeError && <div style={styles.hint}>Settings write failed: {writeError}</div>}
+        <div style={styles.tabBar}>
+          {tabs.map(item => (
+            <button
+              key={item.id}
+              style={{ ...styles.tabButton, ...(tab === item.id ? styles.tabButtonActive : {}) }}
+              onClick={() => setTab(item.id)}
+            >
+              {item.label}
+            </button>
+          ))}
+        </div>
+        {tab === 'general' && (
         <div style={styles.card}>
           <div style={styles.row}>
             <label style={styles.label}>
@@ -907,11 +1259,13 @@ export function createSettingsSection(ctx: ClientCtx): React.ComponentType<{ clo
             </span>
           </div>
         </div>
+        )}
 
+        {tab === 'advisors' && (
         <div style={styles.card}>
           <div style={styles.row}>
             <strong>Advisors</strong>
-            <span style={styles.hint}>Each advisor reviews transcript updates with its own model and read-only tools.</span>
+            <span style={styles.hint}>Each advisor reviews transcript updates with its own model and read-only tools. Cards are collapsed by default — click a header to expand.</span>
           </div>
           <div style={styles.row}>
             <span style={styles.label}>Add from preset</span>
@@ -940,6 +1294,8 @@ export function createSettingsSection(ctx: ClientCtx): React.ComponentType<{ clo
               entry={entry}
               index={index}
               catalog={catalog}
+              collapsed={!expanded.has(index)}
+              onToggleCollapse={toggleCollapse}
               onPatch={updateAdvisor}
               onRemove={removeAdvisor}
             />
@@ -951,7 +1307,17 @@ export function createSettingsSection(ctx: ClientCtx): React.ComponentType<{ clo
             </button>
           </div>
         </div>
+        )}
 
+        {tab === 'workspaces' && (
+          <WorkspacesMatrix
+            advisors={advisors}
+            knownWorkspaces={view?.knownWorkspaces ?? []}
+            onPatchAdvisor={updateAdvisor}
+          />
+        )}
+
+        {tab === 'monitor' && (
         <div style={styles.card}>
           <strong>Live status</strong>
           {(view?.sessions ?? []).length === 0 ? (
@@ -998,7 +1364,9 @@ export function createSettingsSection(ctx: ClientCtx): React.ComponentType<{ clo
               </div>
             ))
           )}
+          <EventFeed events={view?.recentEvents ?? []} />
         </div>
+        )}
 
         <div style={styles.hint}>
           Advice semantics ported from oh-my-pi (can1357/oh-my-pi, MIT). Advisors investigate with read-only

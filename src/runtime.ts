@@ -88,6 +88,8 @@ export interface SessionRuntimeHost {
   /** Message factory bound to the DSH runtime (createUserMessage). */
   makeUserMessage(text: string): unknown
   log?(message: string, meta?: Record<string, unknown>): void
+  /** Activity-ring hook (monitor surfaces); sessionId is added by the service. */
+  recordEvent?(kind: string, advisor?: string, detail?: string): void
 }
 
 export class SessionAdvisorRuntime {
@@ -259,12 +261,14 @@ export class SessionAdvisorRuntime {
         }
 
         const controller = new AbortController()
+        const startedAt = Date.now()
         try {
           await slot.loop.review(text, { inProgress: item.inProgress, signal: controller.signal })
           slot.updateIndex++
           slot.reviewsCompleted++
           slot.consecutiveFailures = 0
           slot.lastError = undefined
+          this.host.recordEvent?.('review-done', slot.entry.name, `${Date.now() - startedAt}ms`)
         } catch (error) {
           if (this.disposed) return
           slot.lastError = String(error instanceof Error ? error.message : error)
@@ -275,10 +279,12 @@ export class SessionAdvisorRuntime {
             failures: slot.consecutiveFailures,
             error: slot.lastError
           })
+          this.host.recordEvent?.('review-failed', slot.entry.name, slot.lastError)
           if (isPermanentFailure(error)) {
             slot.status = 'halted'
             slot.queued = []
             slot.backlog = 0
+            this.host.recordEvent?.('halted', slot.entry.name, slot.lastError)
             return
           }
           if (this.autoRetry && (this.autoRetryMax === 0 || item.attempt < this.autoRetryMax)) {
@@ -288,6 +294,7 @@ export class SessionAdvisorRuntime {
             if (isQuotaFailure(error)) slot.status = 'quota_exhausted'
             slot.queued.unshift({ inProgress: item.inProgress, retryText: text, attempt: item.attempt + 1 })
             slot.backlog = slot.queued.length
+            this.host.recordEvent?.('retry', slot.entry.name, `attempt ${item.attempt + 1} in ${this.autoRetryDelayMs}ms`)
             this.scheduleDrain(slot, this.autoRetryDelayMs)
             return
           }
@@ -295,6 +302,7 @@ export class SessionAdvisorRuntime {
           if (isQuotaFailure(error)) {
             slot.status = 'quota_exhausted'
             slot.quotaUntil = Date.now() + QUOTA_COOLDOWN_MS
+            this.host.recordEvent?.('quota', slot.entry.name, `cooldown ${QUOTA_COOLDOWN_MS / 1000}s`)
             return
           }
           if (slot.consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
@@ -303,6 +311,7 @@ export class SessionAdvisorRuntime {
             slot.backlog = 0
             slot.consecutiveFailures = 0
             slot.loop.resetConversation()
+            this.host.recordEvent?.('backlog-dropped', slot.entry.name)
             return
           }
           // Brief backoff before the next queued item.
@@ -391,6 +400,11 @@ export class SessionAdvisorRuntime {
         session: this.host.sessionId,
         count: notes.length
       })
+      this.host.recordEvent?.(
+        'intervention',
+        notes.map(note => note.advisor).join(', '),
+        `cancelled running step (${notes.length} notes)`
+      )
       return
     }
 
@@ -418,6 +432,13 @@ export class SessionAdvisorRuntime {
       steered: steerNotes.length,
       coalesced: notes.length > 1
     })
+    for (const advisorNote of notes) {
+      this.host.recordEvent?.(
+        'advice',
+        advisorNote.advisor,
+        `${advisorNote.severity ?? 'nit'} · ${steerNotes.includes(advisorNote) ? 'steer' : 'inject'}`
+      )
+    }
   }
 
   /** Snapshot for the RPC surface. */
@@ -492,6 +513,7 @@ export class SessionAdvisorRuntime {
         attempt,
         error: message
       })
+      this.host.recordEvent?.('continue-sent', undefined, `attempt ${attempt}/${capLabel}`)
     }, this.autoRetryDelayMs)
   }
 

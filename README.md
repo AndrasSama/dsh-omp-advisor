@@ -38,6 +38,8 @@ primary agent ──► session log ──► delta renderer ──► advisor m
 - **Completion gate (on by default, prompt-only).** When the watched agent moves to finish ("done", "all tests pass", goal completion), the advisor verifies the original ask is actually implemented — against the workspace and, when restore points exist, the session's baseline→now diff. If not, it instructs the agent to **report honestly what was done and what wasn't, and ask you whether the partial state is acceptable**. Once the work is verified complete — or you explicitly accept the compromise — the advisor's `acceptance` advisory reminds the agent to **commit the accepted state to the branch it is working on** (the plugin marks the latest restore point accepted; the agent runs the commit).
 - **Tiny-delta skip (optional).** With **Skip tiny deltas** set, transcript updates smaller than the threshold are skipped without calling the advisor model — a cheap way to cut advisor traffic on chatty sessions (skipped deltas are not replayed later).
 - **Containment (ported).** Output quarantine (unavailable-tool requests, output-only destructive directives), 3-consecutive-failure backlog drop, permanent-error halt until settings change, quota/rate-limit cooldown pause. The advisor **never blocks the primary agent** — a deliberate, safer deviation from oh-my-pi's catch-up wait.
+- **Multi-tab settings UI.** The settings section is organized like the Plugin Market's inner tab bar: **General** (policy switches), **Advisors** (the roster — cards collapsed by default, click a header to expand), **Workspaces** (a workspace × advisor activation matrix over the same `workspaces` field), and **Monitor** (live status + activity feed).
+- **Optional sidebar monitor tab.** When [dsh-better-sidebar](https://github.com/omdsh-dev/DSH-better-sidebar) is installed, the plugin registers an **Advisors** tab in the sidebar workbench: per-session advisor cards (status dot, review/advice counters, last error), the activity feed (reviews, deliveries, retries, quota, interventions, restore points), and a tab-strip badge (advisor count; `!` when one is halted/errored). Detection is a bounded runtime probe — **never a hard dependency**: without the sidebar the plugin loads and behaves exactly as before.
 
 ## Install
 
@@ -119,7 +121,9 @@ in the dsh-omp-advisor settings namespace and is edited through the GUI section.
 
 ## Configure
 
-Open **Settings → OMP Advisor**:
+Open **Settings → OMP Advisor**. The section has four inner tabs — **General**, **Advisors**, **Workspaces**, **Monitor** — patterned after the Plugin Market's sub-tab bar.
+
+**General tab:**
 
 - **Attach advisors to sessions** — master switch (off by default).
 - **Review trigger** — `turn` (review completed turns) or `step` (review while the turn runs). Step mode fires on every tool step — the UI warns it is heavy on rate-limited or metered providers.
@@ -130,8 +134,10 @@ Open **Settings → OMP Advisor**:
 - **Restore points** — off by default. When on, snapshots the workspace into hidden git refs at turn boundaries; **keep** sets how many per session (1–100, default 20) and **also snapshot before mutating tools** (on by default) captures before writes/edits/bash. Advisors can then recommend rewinds and verify completion against the session baseline (see [How it works](#how-it-works)).
 - **Completion gate** — on by default (prompt-only, zero extra calls). The advisor verifies work is actually done before the agent claims completion, demands an honest done/not-done report otherwise, and reminds the agent to commit the accepted state (see [How it works](#how-it-works)).
 - **Skip tiny deltas (chars)** — `0` = review everything; `>0` = skip transcript updates smaller than this.
+**Advisors tab:**
+
 - **Add from preset** — one click creates a ready-made advisor from one of the 25 built-in personas (see [Presets](#presets)).
-- **Advisors** — the roster. Per advisor:
+- **Advisors** — the roster, as collapsible cards (**collapsed by default** — click a card header to expand; newly added advisors expand automatically). Per advisor:
   - name,
   - **model picked from the DSH model list** (provider route → model → optional reasoning effort),
   - **max turns** — the advisor's tool-loop budget per review (1–10, default 4),
@@ -140,6 +146,15 @@ Open **Settings → OMP Advisor**:
   - **skills** — the advisor's curated skill chips: remove one (`×`), add any packaged skill from the catalog dropdown, or **reset to preset defaults** if the advisor was created from a preset (see [Skills](#skills)),
   - **skill delivery** — `inject` (default: full skill bodies in the system prompt) or `lazy` (id+description index plus a `load_skill` tool — saves tokens, costs one extra call per loaded skill),
   - per-advisor enable toggle.
+
+**Workspaces tab:**
+
+- A **workspace × advisor matrix**: rows are known workspaces (every workspace open in a session plus every pattern already configured), columns are advisors. A checked cell means that workspace pattern is in the advisor's list; toggling rewrites the same `workspaces` field the card editor uses. An advisor with no patterns runs everywhere — its cells render indeterminate, and checking one scopes it to that single workspace. A free-text row lets you add a workspace pattern that no session has opened yet.
+
+**Monitor tab:**
+
+- **Live status** — per-session advisor status dots, backlog, review/advice counters, last errors, restore-point counts.
+- **Activity feed** — the service-wide event ring (≤100, newest first): reviews with duration, advice deliveries with severity+channel, retries, quota cooldowns, halts, blocker interventions, restore-point snapshots, session attach/detach. The same feed powers the optional sidebar tab.
 
 Settings live in the `dsh-omp-advisor` namespace and apply **live** — no restart needed when you edit the roster.
 
@@ -203,17 +218,19 @@ The plugin packages **250 advisor skills** under [`skills/<id>/SKILL.md`](./skil
 ```bash
 npm install        # dev deps only; DSH packages are runtime-provided
 npm run build      # gen-skills + host ESM (lib/index.js) + client CJS ModuleLoader bundle (lib/client.js)
-npm test           # 89 unit tests over the ported semantics
+npm test           # 98 unit tests over the ported semantics
 npm run typecheck  # tsc --noEmit (DSH packages shimmed)
 ```
 
-Layout: `src/` host plugin (settings, service, runtime, advisor loop, tools, delivery, quarantine, delta, restore-points), `src/client/` settings section + presets, `src/prompts/` ported advisor prompts (incl. the completion-gate protocol), `skills/` the 250 packaged advisor skills (source of truth for the build-time embeds), `scripts/gen-skills.mjs` the skill embed generator, `test/` node:test suite (git-backed tests run against real temporary repositories and skip cleanly when git is absent).
+Layout: `src/` host plugin (settings, service, runtime, advisor loop, tools, delivery, quarantine, delta, restore-points), `src/client/` settings section (multi-tab) + presets + optional better-sidebar tab (`sidebar.tsx`), `src/prompts/` ported advisor prompts (incl. the completion-gate protocol), `skills/` the 250 packaged advisor skills (source of truth for the build-time embeds), `scripts/gen-skills.mjs` the skill embed generator, `test/` node:test suite (git-backed tests run against real temporary repositories and skip cleanly when git is absent; client modules are tested through a minimal React stub).
 
 ## Attribution & license
 
 Advisor semantics and prompt texts ported from [can1357/oh-my-pi](https://github.com/can1357/oh-my-pi) (`packages/coding-agent/src/advisor/`), © Mario Zechner / Can Bölük / Stencil Labs, under the MIT license reproduced in [`NOTICE-oh-my-pi-LICENSE`](./NOTICE-oh-my-pi-LICENSE). This plugin is an independent port for DeepSeek Harness and is not affiliated with the oh-my-pi project.
 
 The restore-point design borrows patterns (no code) from two community plugins: [PerryLink/dsh-checkpoint-rewind](https://github.com/PerryLink/dsh-checkpoint-rewind) (Apache-2.0) — side-effect-free git-object snapshots, pre-mutation capture listeners, worktree-only restore that keeps post-snapshot files — and [Anionex/dsh-turn-rewind](https://github.com/Anionex/dsh-turn-rewind) (BSD-3-Clause) — the explicit-only / no-Git-control-plane-mutation safety contract. Thanks to both projects for publishing their designs.
+
+The optional sidebar monitor tab integrates with [omdsh-dev/DSH-better-sidebar](https://github.com/omdsh-dev/DSH-better-sidebar) (MIT) through its public `ctx.betterSidebar.registerTab` service API, following its external-plugin guide (optional peer dependency, effect-wrapped registration, runtime probe instead of a hard inject).
 
 This plugin: MIT — see [`LICENSE`](./LICENSE).
 
@@ -223,6 +240,7 @@ This plugin: MIT — see [`LICENSE`](./LICENSE).
 - Restore points need a git worktree: non-git (and unborn-HEAD) workspaces are skipped, and sparse checkouts/submodules are out of scope for snapshots. A restore keeps files created after the point — deleting them is the model's deliberate judgment call, guided by the advisory.
 - Consuming `ctx.changeLedger` when dsh-turn-rewind is installed, human-approval (`ask`) routing for risky tool patterns, and session-state (seed-replay) rewind are all future work.
 - No mutating-tool grants for advisors yet (oh-my-pi's WATCHDOG.yml roster). Blocker intervention (opt-in step cancellation) is the first intervention layer; full WATCHDOG grants remain targeted for a later release behind the DSH approval flow.
-- No in-session "advisors watching" badge yet; health is visible in the settings Live status panel (errors now show inline there).
-- Status panel polls every 5 s while the settings section is open; no push yet.
+- No in-session "advisors watching" badge yet; health is visible in the settings Monitor tab and — with dsh-better-sidebar installed — in the sidebar Advisors tab (status badge included).
+- Status panel polls every 5 s while the settings section is open (sidebar tab: 2 s while registered); no push yet. The activity ring is in-memory only (≤100 events, lost on restart) — monitoring, not audit.
+- **Next up (v0.7.0): advisor memory.** Ecosystem research (deepseek-harness Discussions + the plugin directory) shows memory is a top community demand yet every memory plugin serves the primary agent — no reviewer/advisor model has persistent memory. Planned: per-workspace lesson store (plain markdown/JSONL), deterministic zero-LLM recall + bounded injection into advisor prompts, composing with restore points (rewind lessons) and the completion gate (compromise records), with a user setting choosing the write gate: approval-staged (default) / auto-with-quarantine / read-only.
 - Web profile UI; other profiles can still configure the namespace by hand.

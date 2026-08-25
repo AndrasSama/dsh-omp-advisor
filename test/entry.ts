@@ -9,6 +9,7 @@ export { AdvisorLoop } from '../src/advisor-loop'
 export { SessionAdvisorRuntime } from '../src/runtime'
 export { AdvisorService } from '../src/service'
 export { registerAdvisorRpc, RPC_CHANNEL } from '../src/rpc'
+export { mountAdvisorSidebarTab } from '../src/client/sidebar'
 export {
   probeGit,
   clearProbeCache,
