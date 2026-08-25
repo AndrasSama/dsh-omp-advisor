@@ -40,6 +40,7 @@ interface SettingsView {
   autoRetry: boolean
   autoRetryDelayMs: number
   autoRetryMax: number
+  interveneOnBlocker: boolean
   minDeltaChars: number
   advisors: AdvisorEntryView[]
 }
@@ -770,25 +771,46 @@ export function createSettingsSection(ctx: ClientCtx): React.ComponentType<{ clo
             <span style={{ ...styles.hint, opacity: 0.75 }}>ms, up to</span>
             <input
               type="number"
-              min={1}
-              max={10}
+              min={0}
+              max={999}
               step={1}
-              style={{ ...styles.input, width: 60 }}
+              style={{ ...styles.input, width: 70 }}
               value={value.autoRetryMax ?? 3}
               onChange={event => {
                 const parsed = Number.parseInt(event.target.value, 10)
                 if (Number.isFinite(parsed)) {
-                  write('autoRetryMax', Math.min(10, Math.max(1, parsed)))
+                  write('autoRetryMax', Math.min(999, Math.max(0, parsed)))
                 }
               }}
             />
-            <span style={{ ...styles.hint, opacity: 0.75 }}>attempts</span>
+            <span style={{ ...styles.hint, opacity: 0.75 }}>attempts (0 = unlimited)</span>
           </div>
           <div style={styles.row}>
             <span style={styles.label} />
             <span style={styles.hint}>
               Failed advisor reviews re-run after the delay; a failed primary-model turn receives an automatic
-              “continue” message. User aborts and permanent errors (unknown model/provider) never retry.
+              “continue” message. User aborts and permanent errors (unknown model/provider) never retry, even
+              when the cap is unlimited.
+            </span>
+          </div>
+          <div style={styles.row}>
+            <span style={styles.label}>Blocker intervention</span>
+            <label>
+              <input
+                type="checkbox"
+                checked={value.interveneOnBlocker === true}
+                onChange={event => write('interveneOnBlocker', event.target.checked)}
+              />{' '}
+              cancel the running step when an advisor raises a blocker
+            </label>
+          </div>
+          <div style={styles.row}>
+            <span style={styles.label} />
+            <span style={{ ...styles.hint, color: 'rgb(220,160,90)' }}>
+              Escalation, off by default. With review trigger “step”, a blocker raised while the primary agent
+              is running aborts the step's not-yet-started tool calls and wakes the agent with the advisory.
+              Already-running tool calls are never killed; DSH offers no pre-call veto, so fast tools may finish
+              before the advisor reacts. Advice stays advice unless you opt in.
             </span>
           </div>
           <div style={styles.row}>

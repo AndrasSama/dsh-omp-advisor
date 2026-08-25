@@ -73,10 +73,18 @@ export const advisorSettingsSchema = z.object({
     .description('Delay in ms before an auto-retry fires (advisor review retry or primary "continue" message).'),
   autoRetryMax: z
     .number()
-    .min(1)
-    .max(10)
+    .min(0)
+    .max(999)
     .default(3)
-    .description('Max auto-retry attempts per failed advisor review, and per primary-model failure episode.'),
+    .description(
+      'Max auto-retry attempts per failed advisor review, and per primary-model failure episode. 0 = unlimited (permanent errors still never retry).'
+    ),
+  interveneOnBlocker: z
+    .boolean()
+    .default(false)
+    .description(
+      'Escalation: when an advisor raises a blocker while the primary agent is running, cancel the running step (undispatched tool calls are aborted) and wake the agent with the advisory. Off by default — advice stays advice.'
+    ),
   minDeltaChars: z
     .number()
     .min(0)
@@ -100,10 +108,10 @@ function coerceAutoRetryDelayMs(raw: unknown): number {
   return Math.min(300000, Math.max(1000, Math.round(value)))
 }
 
-/** Clamp the auto-retry attempt cap to the schema bounds. */
+/** Clamp the auto-retry attempt cap to the schema bounds (0 = unlimited). */
 function coerceAutoRetryMax(raw: unknown): number {
   const value = typeof raw === 'number' && Number.isFinite(raw) ? raw : 3
-  return Math.min(10, Math.max(1, Math.round(value)))
+  return Math.min(999, Math.max(0, Math.round(value)))
 }
 
 /** Clamp the minimum review delta size to the schema bounds (chars; 0 = off). */
@@ -180,6 +188,7 @@ export function normalizeSettings(raw: unknown): AdvisorSettings {
     autoRetry: (value as { autoRetry?: unknown }).autoRetry !== false,
     autoRetryDelayMs: coerceAutoRetryDelayMs((value as { autoRetryDelayMs?: unknown }).autoRetryDelayMs),
     autoRetryMax: coerceAutoRetryMax((value as { autoRetryMax?: unknown }).autoRetryMax),
+    interveneOnBlocker: (value as { interveneOnBlocker?: unknown }).interveneOnBlocker === true,
     minDeltaChars: coerceMinDeltaChars((value as { minDeltaChars?: unknown }).minDeltaChars),
     advisors: deduped
   }
@@ -234,6 +243,7 @@ export function normalizeSettingsLenient(raw: unknown): AdvisorSettings {
     autoRetry: (value as { autoRetry?: unknown }).autoRetry !== false,
     autoRetryDelayMs: coerceAutoRetryDelayMs((value as { autoRetryDelayMs?: unknown }).autoRetryDelayMs),
     autoRetryMax: coerceAutoRetryMax((value as { autoRetryMax?: unknown }).autoRetryMax),
+    interveneOnBlocker: (value as { interveneOnBlocker?: unknown }).interveneOnBlocker === true,
     minDeltaChars: coerceMinDeltaChars((value as { minDeltaChars?: unknown }).minDeltaChars),
     advisors: preserved
   }

@@ -75,8 +75,14 @@ export interface AdvisorSettings {
   autoRetry: boolean
   /** Delay before an auto-retry fires (ms). */
   autoRetryDelayMs: number
-  /** Max auto-retry attempts per failed review / failure episode. */
+  /** Max auto-retry attempts per failed review / failure episode. 0 = unlimited. */
   autoRetryMax: number
+  /**
+   * Escalation (off by default): when an advisor raises a blocker while the
+   * primary agent is running, cancel the running step (undispatched tool
+   * calls abort) and wake the agent with the advisory as a followup.
+   */
+  interveneOnBlocker: boolean
   /**
    * Skip reviews whose rendered delta is smaller than this many characters
    * (0 = review everything). Skipped deltas are not replayed later.
@@ -137,6 +143,12 @@ export interface AgentLike {
   inject(message: unknown): void
   steer(message: unknown): void
   followup(message: unknown): void
+  /**
+   * Abort the running step (undispatched parallel tool calls are dropped,
+   * started ones commit). Present on live DSH agent loops; optional here so
+   * the plugin degrades to advice-only on hosts without it.
+   */
+  cancel?(cause: unknown, options?: { keepInbox?: boolean }): void
 }
 
 /** `ctx.llm.stream` chunk (dsh-llm StreamChunk subset the loop consumes). */

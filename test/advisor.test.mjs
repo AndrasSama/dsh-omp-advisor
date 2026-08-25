@@ -691,10 +691,12 @@ function stubAgent(status = 'idle') {
   const injected = []
   const steered = []
   const followups = []
+  const cancels = []
   return {
     injected,
     steered,
     followups,
+    cancels,
     id: 'agent-1',
     status,
     session: { id: 's1', events: [] },
@@ -706,6 +708,9 @@ function stubAgent(status = 'idle') {
     },
     followup(message) {
       followups.push(message)
+    },
+    cancel(cause, options) {
+      cancels.push({ cause, options })
     }
   }
 }
@@ -791,7 +796,8 @@ test('normalizeSettings clamps auto-retry and min-delta, carries workspaces and 
     enabled: true,
     autoRetry: true,
     autoRetryDelayMs: 999999,
-    autoRetryMax: 42,
+    autoRetryMax: 1500,
+    interveneOnBlocker: true,
     minDeltaChars: -5,
     advisors: [
       {
@@ -806,10 +812,15 @@ test('normalizeSettings clamps auto-retry and min-delta, carries workspaces and 
   })
   assert.equal(value.autoRetry, true)
   assert.equal(value.autoRetryDelayMs, 300000)
-  assert.equal(value.autoRetryMax, 10)
+  assert.equal(value.autoRetryMax, 999)
+  assert.equal(value.interveneOnBlocker, true)
   assert.equal(value.minDeltaChars, 0)
   assert.equal(value.advisors[0].skillMode, 'lazy')
   assert.deepEqual(value.advisors[0].workspaces, ['Qwest Chain'])
+  // 0 = unlimited survives normalization; negatives clamp to 0.
+  assert.equal(normalizeSettings({ autoRetryMax: 0 }).autoRetryMax, 0)
+  assert.equal(normalizeSettings({ autoRetryMax: -3 }).autoRetryMax, 0)
+  assert.equal(normalizeSettings({ autoRetryMax: 42 }).autoRetryMax, 42)
 })
 
 test('normalizeSettings defaults auto-retry on with conservative bounds', () => {
@@ -817,6 +828,7 @@ test('normalizeSettings defaults auto-retry on with conservative bounds', () => 
   assert.equal(value.autoRetry, true)
   assert.equal(value.autoRetryDelayMs, 5000)
   assert.equal(value.autoRetryMax, 3)
+  assert.equal(value.interveneOnBlocker, false)
   assert.equal(value.minDeltaChars, 0)
   // inject is the default skill mode and is not stored explicitly
   assert.equal(normalizeSettings({ advisors: [{ name: 'a', provider: 'p', model: 'm', maxTurns: 4 }] }).advisors[0].skillMode, undefined)
@@ -931,6 +943,97 @@ test('auto-retry off keeps the single-attempt failure behavior', async () => {
   await new Promise(resolve => setTimeout(resolve, 80))
   assert.equal(llm.calls.length, 1)
   runtime.dispose()
+})
+
+test('auto-retry cap 0 retries without bound until the review succeeds', async () => {
+  const agent = stubAgent()
+  const llm = scriptedLlm([
+    'FAIL',
+    'FAIL',
+    'FAIL',
+    'FAIL',
+    'FAIL',
+    [{ type: 'tool-call', id: 'c1', name: 'advise', arguments: JSON.stringify({ note: 'finally made it', severity: 'nit' }) }]
+  ])
+  const runtime = runtimeWithEvents({
+    llm,
+    agent,
+    events: oneUserEvent,
+    settings: { ...retryBaseSettings, autoRetryMax: 0 }
+  })
+  runtime.autoRetryDelayMs = 10
+  runtime.enqueueReview(false)
+  await new Promise(resolve => setTimeout(resolve, 400))
+  assert.equal(llm.calls.length, 6)
+  assert.equal(agent.injected.length, 1)
+  assert.match(agent.injected[0].text, /finally made it/)
+  runtime.dispose()
+})
+
+test('auto-continue cap 0 keeps continuing past the old cap and labels ∞', async () => {
+  const agent = stubAgent()
+  const runtime = runtimeWithEvents({
+    llm: scriptedLlm([]),
+    agent,
+    events: [],
+    settings: { ...retryBaseSettings, autoRetryMax: 0 }
+  })
+  runtime.autoRetryDelayMs = 10
+  const fail = { kind: 'error', error: { message: 'boom', code: 'X' } }
+  for (let i = 0; i < 5; i++) {
+    runtime.onTurnEnd(fail)
+    await new Promise(resolve => setTimeout(resolve, 30))
+  }
+  assert.equal(agent.followups.length, 5)
+  assert.match(agent.followups[4].text, /5\/∞/)
+  runtime.dispose()
+})
+
+/* --------------------------- runtime: blocker intervention --------------------------- */
+
+test('interveneOnBlocker cancels the running step and wakes the agent with the advisory', () => {
+  const agent = stubAgent('running')
+  const runtime = runtimeWithEvents({
+    llm: scriptedLlm([]),
+    agent,
+    events: [],
+    settings: { ...retryBaseSettings, interveneOnBlocker: true }
+  })
+  runtime.deliver('stop: that rm -rf is unrecoverable', 'blocker', 'a')
+  assert.equal(agent.cancels.length, 1)
+  assert.deepEqual(agent.cancels[0].options, { keepInbox: true })
+  assert.equal(agent.followups.length, 1)
+  assert.match(agent.followups[0].text, /stop: that rm -rf is unrecoverable/)
+  assert.equal(agent.steered.length, 0) // replaced by cancel + followup
+  runtime.dispose()
+})
+
+test('intervention stays off unless opted in, and only fires while the primary runs', () => {
+  // Opted out: blocker steers as before.
+  const agentOff = stubAgent('running')
+  const runtimeOff = runtimeWithEvents({
+    llm: scriptedLlm([]),
+    agent: agentOff,
+    events: [],
+    settings: { ...retryBaseSettings, interveneOnBlocker: false }
+  })
+  runtimeOff.deliver('dangerous move', 'blocker', 'a')
+  assert.equal(agentOff.cancels.length, 0)
+  assert.equal(agentOff.steered.length, 1)
+  runtimeOff.dispose()
+
+  // Opted in but primary idle: no running step to cancel — normal channels.
+  const agentIdle = stubAgent('idle')
+  const runtimeIdle = runtimeWithEvents({
+    llm: scriptedLlm([]),
+    agent: agentIdle,
+    events: [],
+    settings: { ...retryBaseSettings, interveneOnBlocker: true }
+  })
+  runtimeIdle.deliver('dangerous move', 'blocker', 'a')
+  assert.equal(agentIdle.cancels.length, 0)
+  assert.equal(agentIdle.steered.length, 1)
+  runtimeIdle.dispose()
 })
 
 test('minDeltaChars skips tiny deltas without calling the model', async () => {

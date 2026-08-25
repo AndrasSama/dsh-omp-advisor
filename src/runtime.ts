@@ -104,6 +104,8 @@ export class SessionAdvisorRuntime {
   private autoRetry = true
   private autoRetryDelayMs = 5000
   private autoRetryMax = 3
+  /** Escalation: blocker raised mid-run cancels the step (opt-in). */
+  private interveneOnBlocker = false
   /** Skip reviews whose rendered delta is smaller than this (chars; 0 = off). */
   private minDeltaChars = 0
   /** Primary-model failure episode state (resets on a completed turn). */
@@ -128,7 +130,9 @@ export class SessionAdvisorRuntime {
     this.coalesceMs = Math.max(0, settings.adviceCoalesceMs || 0)
     this.autoRetry = settings.autoRetry !== false
     this.autoRetryDelayMs = Math.min(300000, Math.max(1000, Math.round(settings.autoRetryDelayMs || 5000)))
-    this.autoRetryMax = Math.min(10, Math.max(1, Math.round(settings.autoRetryMax || 3)))
+    const maxRaw = Number.isFinite(settings.autoRetryMax) ? settings.autoRetryMax : 3
+    this.autoRetryMax = Math.min(999, Math.max(0, Math.round(maxRaw)))
+    this.interveneOnBlocker = settings.interveneOnBlocker === true
     this.minDeltaChars = Math.min(100000, Math.max(0, Math.round(settings.minDeltaChars || 0)))
     const next = new Map<string, AdvisorSlot>()
     for (const entry of settings.advisors) {
@@ -269,7 +273,7 @@ export class SessionAdvisorRuntime {
             slot.backlog = 0
             return
           }
-          if (this.autoRetry && item.attempt < this.autoRetryMax) {
+          if (this.autoRetry && (this.autoRetryMax === 0 || item.attempt < this.autoRetryMax)) {
             // Auto-retry the same delta after the configured delay. Quota
             // failures show as quota_exhausted meanwhile; scheduleDrain clears
             // both before the retry runs.
@@ -361,6 +365,27 @@ export class SessionAdvisorRuntime {
       return
     }
     const primaryRunning = agent.status === 'running'
+
+    // Escalation (opt-in): a blocker raised while the primary is running
+    // cancels the running step — undispatched parallel tool calls abort,
+    // started ones commit — then wakes the agent with the whole batch as a
+    // followup so it sees the reason and can react. Hosts without
+    // agent.cancel fall through to the normal steer path.
+    if (
+      this.interveneOnBlocker &&
+      primaryRunning &&
+      typeof agent.cancel === 'function' &&
+      notes.some(note => note.severity === 'blocker')
+    ) {
+      agent.cancel({ kind: 'advisor-blocker', plugin: 'dsh-omp-advisor' }, { keepInbox: true })
+      agent.followup(this.createUserMessage(formatAdvisorBatchContent(notes)))
+      this.host.log?.('advisor blocker intervention: cancelled running step', {
+        session: this.host.sessionId,
+        count: notes.length
+      })
+      return
+    }
+
     const steerNotes: AdvisorNote[] = []
     const injectNotes: AdvisorNote[] = []
     for (const advisorNote of notes) {
@@ -431,7 +456,7 @@ export class SessionAdvisorRuntime {
       })
       return
     }
-    if (this.continueAttempts >= this.autoRetryMax) {
+    if (this.autoRetryMax !== 0 && this.continueAttempts >= this.autoRetryMax) {
       this.host.log?.('primary turn failed; auto-retry attempts exhausted', {
         session: this.host.sessionId,
         attempts: this.continueAttempts,
@@ -441,6 +466,7 @@ export class SessionAdvisorRuntime {
     }
     this.continueAttempts++
     const attempt = this.continueAttempts
+    const capLabel = this.autoRetryMax === 0 ? '∞' : String(this.autoRetryMax)
     if (this.continueTimer !== undefined) clearTimeout(this.continueTimer)
     this.continueTimer = setTimeout(() => {
       this.continueTimer = undefined
@@ -450,7 +476,7 @@ export class SessionAdvisorRuntime {
       const clipped = message.length > 200 ? `${message.slice(0, 200)}…` : message
       agent.followup(
         this.createUserMessage(
-          `[dsh-omp-advisor auto-retry ${attempt}/${this.autoRetryMax}] Your previous turn failed ("${clipped}"). Please continue from where you left off.`
+          `[dsh-omp-advisor auto-retry ${attempt}/${capLabel}] Your previous turn failed ("${clipped}"). Please continue from where you left off.`
         )
       )
       this.host.log?.('auto-continue sent after failed primary turn', {

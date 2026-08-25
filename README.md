@@ -32,7 +32,8 @@ primary agent ──► session log ──► delta renderer ──► advisor m
 - **Auto-retry (optional, on by default).** Failures recover automatically instead of dying silently:
   - A failed advisor review (rate limit, transient provider error) re-runs the *same* delta after the configured delay, up to the configured attempt cap.
   - A failed **primary-model turn** (`turn/end` with `reason.kind: "error"`) receives an automatic *"continue from where you left off"* followup message after the same delay, bounded per failure episode and reset by any completed turn.
-  - User aborts and permanent errors (unknown model/provider) never retry. Toggle the whole feature off with **Auto-retry failures**.
+  - Attempt cap: `1–999`, or **`0` = unlimited** (the message labels the cap `∞`). User aborts and permanent errors (unknown model/provider) never retry — even with an unlimited cap. Toggle the whole feature off with **Auto-retry failures**.
+- **Blocker intervention (optional, off by default).** DSH exposes no synchronous pre-tool-call veto to plugins, so this is the strongest interruption the platform allows: when an advisor raises a `blocker` while the primary agent is **running**, the plugin calls `agent.cancel` on the running step — tool calls not yet dispatched abort, already-running calls commit — then wakes the agent with the advisory as a followup so it sees the reason and can react. With review trigger `step`, this lands between steps, i.e. before the model can issue the *next* destructive call; a fast tool inside the current step may finish first. Opt in with **Blocker intervention**; without it, advice stays advice.
 - **Tiny-delta skip (optional).** With **Skip tiny deltas** set, transcript updates smaller than the threshold are skipped without calling the advisor model — a cheap way to cut advisor traffic on chatty sessions (skipped deltas are not replayed later).
 - **Containment (ported).** Output quarantine (unavailable-tool requests, output-only destructive directives), 3-consecutive-failure backlog drop, permanent-error halt until settings change, quota/rate-limit cooldown pause. The advisor **never blocks the primary agent** — a deliberate, safer deviation from oh-my-pi's catch-up wait.
 
@@ -122,7 +123,8 @@ Open **Settings → OMP Advisor**:
 - **Review trigger** — `turn` (review completed turns) or `step` (review while the turn runs). Step mode fires on every tool step — the UI warns it is heavy on rate-limited or metered providers.
 - **Interrupting severities** — which severities steer; the rest ride as non-interrupting context.
 - **Coalesce advice (ms)** — `0` = deliver each note immediately; `>0` = batch notes from all advisors within the window into one message per channel (see [How it works](#how-it-works)). Clamped to 0–10000.
-- **Auto-retry failures** — toggle + delay (ms, 1000–300000, default 5000) + attempt cap (1–10, default 3). Retries failed advisor reviews and sends an automatic "continue" to a failed primary turn (see [How it works](#how-it-works)).
+- **Auto-retry failures** — toggle + delay (ms, 1000–300000, default 5000) + attempt cap (0–999, default 3, **0 = unlimited**). Retries failed advisor reviews and sends an automatic "continue" to a failed primary turn (see [How it works](#how-it-works)).
+- **Blocker intervention** — off by default. When on, a blocker raised while the primary runs cancels the running step and wakes the agent with the advisory (see [How it works](#how-it-works)).
 - **Skip tiny deltas (chars)** — `0` = review everything; `>0` = skip transcript updates smaller than this.
 - **Add from preset** — one click creates a ready-made advisor from one of the 25 built-in personas (see [Presets](#presets)).
 - **Advisors** — the roster. Per advisor:
@@ -184,10 +186,10 @@ The plugin packages **250 advisor skills** under [`skills/<id>/SKILL.md`](./skil
 
 ## Safety model
 
-- Advisors get **read-only** tools confined to the watched session's workspace (`read`, `grep`, `glob`, plus `load_skill` in lazy mode). No mutating tools yet — oh-my-pi's WATCHDOG.yml grant system is planned for v0.4 behind DSH's approval flow.
+- Advisors get **read-only** tools confined to the watched session's workspace (`read`, `grep`, `glob`, plus `load_skill` in lazy mode). No mutating tools yet — oh-my-pi's WATCHDOG.yml grant system is planned for a later release behind DSH's approval flow (see Blocker intervention for what exists today).
 - Advisor output passes a quarantine before it can become context: requests for unavailable tools and output-only destructive directives (ported hazard patterns) are replaced with a sanitized error.
 - Advisories injected into the session are excluded from future advisor deltas (no feedback loops).
-- The plugin never cancels, blocks, or gates the primary agent. Auto-retry only ever *adds* a followup message after a failed turn — it never suppresses, rewrites, or re-drives anything else, and it stops after the configured attempt cap.
+- The plugin never blocks or gates the primary agent on its own initiative. Auto-retry only ever *adds* a followup message after a failed turn, and stops after the configured attempt cap (permanent errors never retry). The one exception is the **opt-in** blocker intervention: only when you enable it does a blocker advisory cancel the running step — and even then already-running tool calls are never killed.
 - The `/dsh-omp-advisor` RPC registers with `authority: 'trusted-host'`: requests pass the same Host/Origin trust fence as `/api` (loopback, or a deployment's `--trusted-host` authorities), so the settings section and live status panel also work from remote GUIs. Handlers return `RpcResult` values and never throw.
 - Settings reads and writes ride that same channel (`snapshot` / `update` endpoints) instead of `ctx.settingsScope`: DSH keeps settingsScope persistence loopback-only, so a scope-bound section would render "unavailable" in every remote browser. Host-side, `update` still goes through the settings domain's schema + validation + live watch.
 
@@ -196,7 +198,7 @@ The plugin packages **250 advisor skills** under [`skills/<id>/SKILL.md`](./skil
 ```bash
 npm install        # dev deps only; DSH packages are runtime-provided
 npm run build      # gen-skills + host ESM (lib/index.js) + client CJS ModuleLoader bundle (lib/client.js)
-npm test           # 69 unit tests over the ported semantics
+npm test           # 73 unit tests over the ported semantics
 npm run typecheck  # tsc --noEmit (DSH packages shimmed)
 ```
 
@@ -211,7 +213,7 @@ This plugin: MIT — see [`LICENSE`](./LICENSE).
 ## Known limitations
 
 - Advisories render as ordinary plugin messages in the conversation (a dedicated advisory card is future work).
-- No mutating-tool grants for advisors yet (oh-my-pi's WATCHDOG.yml roster) — targeted for v0.4 behind the DSH approval flow.
+- No mutating-tool grants for advisors yet (oh-my-pi's WATCHDOG.yml roster). Blocker intervention (opt-in step cancellation) is the first intervention layer; full WATCHDOG grants remain targeted for a later release behind the DSH approval flow.
 - No in-session "advisors watching" badge yet; health is visible in the settings Live status panel (errors now show inline there).
 - Status panel polls every 5 s while the settings section is open; no push yet.
 - Web profile UI; other profiles can still configure the namespace by hand.
