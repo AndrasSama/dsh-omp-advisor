@@ -1,8 +1,8 @@
 {
   "name": "dsh-omp-advisor",
-  "version": "0.6.0",
-  "description": "oh-my-pi advisor subsystem ported to DeepSeek Harness: independent reviewer models watch your agent's live transcript, investigate with read-only tools, and advise it — nit injects, concern/blocker steer.",
-  "license": "MIT",
+  "version": "0.6.1",
+  "description": "Ward Council — oh-my-pi advisor subsystem ported to DeepSeek Harness: independent reviewer models watch your agent's live transcript, investigate with read-only tools, and advise it. Advisors guide. The ward protects. The model executes.",
+  "license": "SEE LICENSE IN LICENSE",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
@@ -13,6 +13,7 @@
   "files": [
     "lib",
     "skills",
+    "assets",
     "cordis.patch.yml",
     "README.md",
     "LICENSE",

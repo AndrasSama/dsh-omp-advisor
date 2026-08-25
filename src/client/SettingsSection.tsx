@@ -1,5 +1,5 @@
 /**
- * The "OMP Advisor" settings section: master switch, review policy, and the
+ * The "Ward Council" settings section: master switch, review policy, and the
  * advisor roster with model pickers fed by the DSH model list, plus a live
  * status panel — all backed by the `/dsh-omp-advisor` RPC channel.
  *
@@ -737,6 +737,21 @@ function EventFeed(props: { events: EventEntryView[] }): React.ReactElement {
 
 /* --------------------------------- component -------------------------------- */
 
+/**
+ * Expansion state is keyed by roster index; when a card is removed, every
+ * later index shifts down by one. Rebuild the set so the same *cards* stay
+ * expanded — drop the removed index, decrement everything above it.
+ * Exported for unit tests (pure; no React).
+ */
+export function shiftExpandedAfterRemove(expanded: Set<number>, removedIndex: number): Set<number> {
+  const next = new Set<number>()
+  for (const index of expanded) {
+    if (index < removedIndex) next.add(index)
+    else if (index > removedIndex) next.add(index - 1)
+  }
+  return next
+}
+
 export function createSettingsSection(ctx: ClientCtx): React.ComponentType<{ close?: () => void }> {
   return function OmpAdvisorSettingsSection() {
     // Server truth (snapshot poll + settled writes) and an optimistic draft
@@ -919,6 +934,8 @@ export function createSettingsSection(ctx: ClientCtx): React.ComponentType<{ clo
           'advisors',
           advisorsRef.current.filter((_, i) => i !== index)
         )
+        // Keep expansion attached to the same cards after the index shift.
+        setExpanded(current => shiftExpandedAfterRemove(current, index))
       },
       [write]
     )

@@ -201,7 +201,7 @@ function AdvisorsMonitorTab(): React.ReactElement {
         <div style={cardStyle}>
           <strong>No advisor sessions</strong>
           <span style={hint}>
-            Advisors attach to sessions when the plugin is enabled (Settings → OMP Advisor → General) and a
+            Advisors attach to sessions when the plugin is enabled (Settings → Ward Council → General) and a
             session matches an advisor's workspace patterns.
           </span>
         </div>

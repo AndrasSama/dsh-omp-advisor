@@ -1,6 +1,12 @@
-# dsh-omp-advisor
+<p align="center">
+  <img src="./assets/banner.png" alt="Ward Council — A DeepSeek Harness Plugin" width="100%">
+</p>
 
-**oh-my-pi's advisor subsystem, ported to [DeepSeek Harness](https://github.com/deepseek-ai/dsh) (DSH).**
+# Ward Council
+
+*Package name: `dsh-omp-advisor` — the name under which it installs and stores settings.*
+
+**oh-my-pi's advisor subsystem, ported to [DeepSeek Harness](https://github.com/deepseek-ai/dsh) (DSH). Advisors guide. The ward protects. The model executes.**
 
 Attach one or more independent *advisor* models to your live DSH sessions. Each advisor watches the primary agent's transcript as it grows, may investigate the workspace with read-only tools (`read` / `grep` / `glob`), and delivers concrete advice through a dedicated `advise` tool — exactly the advisor-watchdog design from [can1357/oh-my-pi](https://github.com/can1357/oh-my-pi), re-built natively on DSH's plugin seams.
 
@@ -62,7 +68,7 @@ Then **restart DSH Web** and **hard-refresh the browser** (Ctrl+Shift+R). The re
 
 **Verify**
 
-1. Open **Settings** in the DSH Web GUI — an **OMP Advisor** section must be present.
+1. Open **Settings** in the DSH Web GUI — a **Ward Council** section must be present.
 2. Its **Live status** panel lists sessions with attached advisors once the master switch is on.
 3. First run: enable the master switch, click **Add from preset** (or **+ Add advisor**), pick a model from the dropdown, and start any session — the advisor chip appears in Live status within one turn.
 
@@ -108,7 +114,7 @@ Steps:
      rsync -a --delete --exclude node_modules --exclude .git \
        /abs/path/to/dsh-omp-advisor/ ~/.dsh/profiles/web/node_modules/dsh-omp-advisor/
 4. Ask the user to restart `dsh web` and hard-refresh the browser (Ctrl+Shift+R).
-5. Post-restart verification in the GUI: Settings shows an "OMP Advisor"
+5. Post-restart verification in the GUI: Settings shows a "Ward Council"
    section. The plugin is INERT until the user enables "Attach advisors to
    sessions" (off by default) and adds at least one advisor with a model picked
    from the DSH model list — tell them this.
@@ -121,7 +127,7 @@ in the dsh-omp-advisor settings namespace and is edited through the GUI section.
 
 ## Configure
 
-Open **Settings → OMP Advisor**. The section has four inner tabs — **General**, **Advisors**, **Workspaces**, **Monitor** — patterned after the Plugin Market's sub-tab bar.
+Open **Settings → Ward Council**. The section has four inner tabs — **General**, **Advisors**, **Workspaces**, **Monitor** — patterned after the Plugin Market's sub-tab bar.
 
 **General tab:**
 
@@ -218,7 +224,7 @@ The plugin packages **250 advisor skills** under [`skills/<id>/SKILL.md`](./skil
 ```bash
 npm install        # dev deps only; DSH packages are runtime-provided
 npm run build      # gen-skills + host ESM (lib/index.js) + client CJS ModuleLoader bundle (lib/client.js)
-npm test           # 98 unit tests over the ported semantics
+npm test           # 100 unit tests over the ported semantics
 npm run typecheck  # tsc --noEmit (DSH packages shimmed)
 ```
 
@@ -232,7 +238,7 @@ The restore-point design borrows patterns (no code) from two community plugins: 
 
 The optional sidebar monitor tab integrates with [omdsh-dev/DSH-better-sidebar](https://github.com/omdsh-dev/DSH-better-sidebar) (MIT) through its public `ctx.betterSidebar.registerTab` service API, following its external-plugin guide (optional peer dependency, effect-wrapped registration, runtime probe instead of a hard inject).
 
-This plugin: MIT — see [`LICENSE`](./LICENSE).
+**License.** Ward Council is distributed under the **SamaCorp Inc. Personal Use License** — see [`LICENSE`](./LICENSE): full license for personal use and modification; **no sale** of the software or modified derivatives; unauthorized sales trigger full buyer refunds plus legal fees and $50 per copy sold owed to SamaCorp Inc. One carve-out: the advisor semantics and prompts ported from oh-my-pi remain under MIT (see [`NOTICE-oh-my-pi-LICENSE`](./NOTICE-oh-my-pi-LICENSE)), as MIT requires — those portions keep their MIT terms in every copy. Versions up to and including v0.6.0 were released under MIT; copies already distributed under MIT keep those terms (the relicense is forward-only, from v0.6.1).
 
 ## Known limitations
 

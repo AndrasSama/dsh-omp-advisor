@@ -1,5 +1,5 @@
 /**
- * dsh-omp-advisor browser half: registers the "OMP Advisor" settings section
+ * dsh-omp-advisor browser half: registers the "Ward Council" settings section
  * and — when dsh-better-sidebar is installed — an "Advisors" monitor tab in
  * the sidebar workbench (optional runtime probe; see ./sidebar.tsx).
  * Loaded through package.json `dsh.client` (web platform) and wrapped for the
@@ -37,7 +37,9 @@ export function apply(ctx: any): void {
             name: 'settings.section',
             id: 'dsh-omp-advisor',
             order: 13,
-            label: () => 'OMP Advisor',
+            // Display name is "Ward Council"; the stable id (and settings
+            // namespace) stays dsh-omp-advisor so installs survive rebrands.
+            label: () => 'Ward Council',
             inject: () => ({})
           },
           createSettingsSection(ctx)

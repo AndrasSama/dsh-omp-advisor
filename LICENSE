@@ -1,21 +1,50 @@
-MIT License
+SamaCorp Inc. Personal Use License
 
-Copyright (c) 2026 AndrasSama
+Copyright (c) 2026 SamaCorp Inc.
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+This license applies to the Ward Council software (package name
+"dsh-omp-advisor"), its source code, documentation, and associated files
+(collectively, the "Software"), except for the third-party components
+identified in Section 4.
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+1. Grant of license
+
+SamaCorp Inc. grants you a full, royalty-free, non-exclusive license to use,
+copy, and modify the Software, provided that all such use is strictly
+personal. You may install and run the Software, study and modify its source,
+and keep modified versions for your own personal use.
+
+2. No sale
+
+You may not sell the Software, or any modified or derived product based on
+it, for any amount of money. This prohibition covers direct sales, paid
+distribution, and bundling the Software or a derivative of it into anything
+you charge for.
+
+3. Penalty for unauthorized sale
+
+If you sell any copy of the Software, or of a modified or derived product
+based on it, in violation of Section 2:
+
+  a. every copy you sold must be refunded to the buyer in its entirety; and
+  b. you will owe SamaCorp Inc. all legal fees incurred in enforcing this
+     license, plus fifty US dollars ($50) for every copy you sold.
+
+4. Third-party components
+
+Portions of this Software are ported from the advisor subsystem of
+oh-my-pi (https://github.com/can1357/oh-my-pi), copyright Mario Zechner,
+Can Bölük, and Stencil Labs, Inc. Those portions remain licensed under the
+MIT license, reproduced in the file NOTICE-oh-my-pi-LICENSE, and the MIT
+terms apply to them. The MIT notice must be preserved in all copies of
+those portions.
+
+5. No warranty
 
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
 IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
+SAMACORP INC. OR THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
+USE OR OTHER DEALINGS IN THE SOFTWARE.

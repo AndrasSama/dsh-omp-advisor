@@ -30,7 +30,8 @@ import {
   markRestorePointAccepted,
   restoreInstructions,
   commitInstructions,
-  mountAdvisorSidebarTab
+  mountAdvisorSidebarTab,
+  shiftExpandedAfterRemove
 } from './.bundle.mjs'
 
 /* -------------------------------- AdviseGate -------------------------------- */
@@ -1985,4 +1986,22 @@ test('client entry never hard-injects betterSidebar (would strand the fiber)', a
   const names = match[1].split(',').map(part => part.trim().replace(/['"]/g, '')).filter(Boolean)
   assert.ok(!names.includes('betterSidebar'), `inject must stay optional-probe only, got: ${names.join(', ')}`)
   assert.ok(names.includes('slots') && names.includes('connection'))
+})
+
+/* ------------------- v0.6.1: expansion set survives card removal ------------------- */
+
+test('shiftExpandedAfterRemove keeps expansion on the same cards after the index shift', () => {
+  // Cards 0, 2, 4 expanded; remove card 2 => old 3 becomes 2, old 4 becomes 3.
+  const next = shiftExpandedAfterRemove(new Set([0, 2, 4]), 2)
+  assert.deepEqual([...next].sort((a, b) => a - b), [0, 3])
+  // Removing the first card shifts everything above it down by one.
+  const afterFirst = shiftExpandedAfterRemove(new Set([0, 1, 2]), 0)
+  assert.deepEqual([...afterFirst].sort((a, b) => a - b), [0, 1])
+})
+
+test('shiftExpandedAfterRemove: removing an unexpanded or absent index is a no-op for the rest', () => {
+  const untouched = shiftExpandedAfterRemove(new Set([0, 1]), 3)
+  assert.deepEqual([...untouched].sort((a, b) => a - b), [0, 1])
+  const fromEmpty = shiftExpandedAfterRemove(new Set(), 0)
+  assert.equal(fromEmpty.size, 0)
 })
