@@ -224,7 +224,7 @@ The plugin packages **250 advisor skills** under [`skills/<id>/SKILL.md`](./skil
 ```bash
 npm install        # dev deps only; DSH packages are runtime-provided
 npm run build      # gen-skills + host ESM (lib/index.js) + client CJS ModuleLoader bundle (lib/client.js)
-npm test           # 101 unit tests over the ported semantics
+npm test           # 103 unit tests over the ported semantics
 npm run typecheck  # tsc --noEmit (DSH packages shimmed)
 ```
 

@@ -2032,3 +2032,41 @@ test('shiftExpandedAfterRemove: removing an unexpanded or absent index is a no-o
   const fromEmpty = shiftExpandedAfterRemove(new Set(), 0)
   assert.equal(fromEmpty.size, 0)
 })
+
+/* --------------------- v0.6.3: session identity in snapshots --------------------- */
+
+test('service snapshot: session title from session/title events + cwd identity', async () => {
+  const events = [{ type: 'user/message', data: { content: [{ type: 'text', text: 'hello' }] } }]
+  const agent = serviceAgent(events)
+  const llm = scriptedLlm([])
+  const ctx = mockHostCtx({ raw: serviceBaseRaw, llm, agents: new Map([['s1', agent]]) })
+  const service = new AdvisorService(ctx, {})
+  const session = { id: 's1', header: { cwd: '/tmp/ws' }, events }
+  ctx.emit('session/created', session)
+  // Title arrives as a session event (DSH session-title service appends it).
+  ctx.emit('session/event', session, { type: 'session/title', data: { title: 'Refactor the parser' } })
+  const snap = service.snapshot('s1')
+  assert.equal(snap.title, 'Refactor the parser')
+  assert.equal(snap.cwd, '/tmp/ws')
+  // A later title event supersedes.
+  ctx.emit('session/event', session, { type: 'session/title', data: { title: 'Refactor the parser (retry)' } })
+  assert.equal(service.snapshot('s1').title, 'Refactor the parser (retry)')
+})
+
+test('service snapshot: pre-existing title in the session log folds in on attach', () => {
+  const ctx = mockHostCtx({ raw: serviceBaseRaw })
+  const service = new AdvisorService(ctx, {})
+  const session = {
+    id: 's2',
+    header: { cwd: '/tmp/other' },
+    events: [
+      { type: 'user/message', data: {} },
+      { type: 'session/title', data: { title: 'Earlier title' } },
+      { type: 'turn/end', data: {} }
+    ]
+  }
+  ctx.emit('session/created', session)
+  const snap = service.snapshot('s2')
+  assert.equal(snap.title, 'Earlier title', 'title folded from existing events')
+  assert.equal(snap.cwd, '/tmp/other')
+})

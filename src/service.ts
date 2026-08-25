@@ -48,6 +48,8 @@ export class AdvisorService extends Service {
   private runtimes = new Map<string, SessionAdvisorRuntime>()
   /** Session cwd per session id, for workspace-scoped advisor filtering. */
   private sessionCwds = new Map<string, string>()
+  /** Latest session title per session id, for the monitor surfaces. */
+  private sessionTitles = new Map<string, string>()
   /** Latest restore point sha per session (parent chaining for the ring). */
   private lastPointSha = new Map<string, string>()
   /** Per-session snapshot serialization (keeps parent chaining ordered). */
@@ -86,9 +88,20 @@ export class AdvisorService extends Service {
     this.settingsValue = normalizeSettings(this.settingsScope.get())
 
     hostCtx.on('session/created', (session: SessionLike) => {
+      // Track identity for the monitor surfaces regardless of enablement: the
+      // workspace row feeds knownWorkspaces and the title feeds snapshots.
+      const id = sessionIdOf(session)
+      const cwd = sessionCwd(session)
+      if (cwd) this.sessionCwds.set(id, cwd)
+      this.foldSessionTitle(session)
       this.attach(session)
     })
     hostCtx.on('session/event', (session: SessionLike, event: { type: string; data?: unknown }) => {
+      if (event.type === 'session/title') {
+        const title = (event.data as { title?: unknown } | undefined)?.title
+        if (typeof title === 'string' && title) this.sessionTitles.set(sessionIdOf(session), title)
+        return
+      }
       this.onSessionEvent(session, event)
     })
     hostCtx.on('session/disposed', (session: SessionLike) => {
@@ -281,6 +294,20 @@ export class AdvisorService extends Service {
     return chained
   }
 
+  /** Pick up a title already present in the session log (late attach / restart). */
+  private foldSessionTitle(session: SessionLike): void {
+    const events = (session.events ?? []) as Array<{ type: string; data?: unknown }>
+    for (let i = events.length - 1; i >= 0; i--) {
+      const event = events[i]
+      if (event?.type !== 'session/title') continue
+      const title = (event.data as { title?: unknown } | undefined)?.title
+      if (typeof title === 'string' && title) {
+        this.sessionTitles.set(sessionIdOf(session), title)
+      }
+      return
+    }
+  }
+
   private attach(session: SessionLike): void {
     if (!this.settingsValue.enabled) return
     const id = sessionIdOf(session)
@@ -345,6 +372,7 @@ export class AdvisorService extends Service {
   private detach(sessionId: string): void {
     const runtime = this.runtimes.get(sessionId)
     this.sessionCwds.delete(sessionId)
+    this.sessionTitles.delete(sessionId)
     this.lastPointSha.delete(sessionId)
     this.snapshotLocks.delete(sessionId)
     this.lastMutationSnapshot.delete(sessionId)
@@ -357,12 +385,23 @@ export class AdvisorService extends Service {
 
   /** Snapshot one session's advisor state for the RPC surface. */
   snapshot(sessionId: string): SessionAdvisorSnapshot {
+    const title = this.sessionTitles.get(sessionId)
+    const cwd = this.sessionCwds.get(sessionId)
+    const identity = {
+      ...(title ? { title } : {}),
+      ...(cwd ? { cwd } : {})
+    }
     const runtime = this.runtimes.get(sessionId)
     if (!runtime) {
-      return { sessionId, active: false, advisors: [], recentNotes: [] }
+      return { sessionId, active: false, advisors: [], recentNotes: [], ...identity }
     }
     const count = this.restorePointCounts.get(sessionId)
-    return { sessionId, ...runtime.snapshot(), ...(count !== undefined ? { restorePoints: count } : {}) }
+    return {
+      sessionId,
+      ...runtime.snapshot(),
+      ...(count !== undefined ? { restorePoints: count } : {}),
+      ...identity
+    }
   }
 
   /** List sessions with attached advisor runtimes. */

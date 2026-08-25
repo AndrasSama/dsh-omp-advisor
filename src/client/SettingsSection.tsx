@@ -67,7 +67,15 @@ interface EventEntryView {
 }
 
 interface SnapshotView {
-  sessions?: { sessionId: string; active: boolean; advisors: AdvisorStatusView[]; restorePoints?: number }[]
+  sessions?: {
+    sessionId: string
+    active: boolean
+    advisors: AdvisorStatusView[]
+    restorePoints?: number
+    /** Additive v0.6.3 identity fields — optional: an older host omits them. */
+    title?: string
+    cwd?: string
+  }[]
   settings: SettingsView
   /** Additive v0.6.0 monitor fields — optional: an older host omits them. */
   knownWorkspaces?: string[]
@@ -1347,7 +1355,12 @@ export function createSettingsSection(ctx: ClientCtx): React.ComponentType<{ clo
             (view?.sessions ?? []).map(session => (
               <div key={session.sessionId} style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                 <span style={styles.hint}>
-                  session {session.sessionId}
+                  {session.title ? (
+                    <strong style={{ color: 'inherit' }}>{session.title}</strong>
+                  ) : (
+                    `session ${session.sessionId}`
+                  )}
+                  {session.cwd ? ` · ${session.cwd}` : ''}
                   {typeof session.restorePoints === 'number' ? ` · ${session.restorePoints} restore points` : ''}
                 </span>
                 <div style={styles.row}>

@@ -51,6 +51,8 @@ interface SidebarSessionView {
   active: boolean
   advisors: SidebarAdvisorStatus[]
   restorePoints?: number
+  title?: string
+  cwd?: string
 }
 
 interface SidebarEventView {
@@ -61,9 +63,16 @@ interface SidebarEventView {
   detail?: string
 }
 
+interface SidebarSettingsAdvisor {
+  name?: string
+  enabled?: boolean
+  workspaces?: string[]
+}
+
 interface SidebarSnapshot {
   sessions?: SidebarSessionView[]
   recentEvents?: SidebarEventView[]
+  settings?: { advisors?: SidebarSettingsAdvisor[] }
 }
 
 interface ConnectionLike {
@@ -79,7 +88,15 @@ let cache: SidebarSnapshot | null = null
 let connectionRef: ConnectionLike | null = null
 let pollTimer: ReturnType<typeof setInterval> | null = null
 let refCount = 0
+/** Session the sidebar tab is scoped to (set by the mounted component). */
+let scopeWanted: string | null = null
 const listeners = new Set<() => void>()
+
+function setScope(sessionId: string | null): void {
+  scopeWanted = sessionId
+  // Refresh promptly so the scoped session appears without waiting a tick.
+  if (refCount > 0) pollOnce()
+}
 
 function notify(): void {
   for (const listener of [...listeners]) {
@@ -96,9 +113,29 @@ function pollOnce(): void {
   if (!connection) return
   connection.rpc
     .call('/dsh-omp-advisor', 'snapshot', {})
-    .then(result => {
+    .then(async result => {
       const value = unwrapRpcResult<SidebarSnapshot>(result, 'advisor snapshot')
-      cache = { sessions: value.sessions ?? [], recentEvents: value.recentEvents ?? [] }
+      let sessions = value.sessions ?? []
+      // The aggregate lists only advisor-attached sessions; when the tab is
+      // scoped to a session without advisors, fetch its (empty) snapshot so
+      // the panel can still name it and explain why nobody is attached.
+      const scope = scopeWanted
+      if (scope && !sessions.some(session => session.sessionId === scope)) {
+        try {
+          const one = unwrapRpcResult<SidebarSessionView>(
+            await connection.rpc.call('/dsh-omp-advisor', 'snapshot', { sessionId: scope }),
+            'scoped session snapshot'
+          )
+          if (one && one.sessionId) sessions = [...sessions, one]
+        } catch {
+          // Scoped fetch is best-effort.
+        }
+      }
+      cache = {
+        sessions,
+        recentEvents: value.recentEvents ?? [],
+        settings: value.settings
+      }
       notify()
     })
     .catch(() => {
@@ -195,10 +232,116 @@ function formatTime(time: number): string {
 
 /* ------------------------------- tab component ------------------------------- */
 
-function AdvisorsMonitorTab(): React.ReactElement {
+/** Client mirror of the host's advisorMatchesWorkspace (substring patterns). */
+function matchesWorkspace(patterns: string[] | undefined, cwd: string | undefined): boolean {
+  const list = (patterns ?? []).map(pattern => pattern.trim()).filter(pattern => pattern !== '')
+  if (list.length === 0) return true
+  if (!cwd) return false
+  return list.some(pattern => cwd.includes(pattern))
+}
+
+function basename(path: string | undefined): string | undefined {
+  if (!path) return undefined
+  const parts = path.split('/').filter(Boolean)
+  return parts.length > 0 ? parts[parts.length - 1] : path
+}
+
+function AdvisorsMonitorTab(props: { scopedSessionId?: string }): React.ReactElement {
   const snapshot = useSnapshot()
-  const sessions = snapshot?.sessions ?? []
+  const scoped = props.scopedSessionId
+
+  // Tell the poller which session this sidebar instance belongs to, so the
+  // aggregate (attached sessions only) is merged with the scoped session's
+  // own snapshot even when no advisors are attached to it.
+  useEffect(() => {
+    setScope(scoped ?? null)
+    return () => setScope(null)
+  }, [scoped])
+
+  const sessions = [...(snapshot?.sessions ?? [])].sort((a, b) => {
+    if (a.sessionId === scoped) return -1
+    if (b.sessionId === scoped) return 1
+    return 0
+  })
   const events = snapshot?.recentEvents ?? []
+  const configured = snapshot?.settings?.advisors ?? []
+
+  const renderSessionCard = (session: SidebarSessionView): React.ReactElement => {
+    const isScoped = session.sessionId === scoped
+    const name = session.title || `Session ${session.sessionId.slice(0, 8)}`
+    const dir = basename(session.cwd)
+    const matching = session.cwd
+      ? configured.filter(entry => entry.enabled !== false && matchesWorkspace(entry.workspaces, session.cwd))
+      : []
+    return (
+      <div
+        key={session.sessionId}
+        style={{
+          ...cardStyle,
+          ...(isScoped ? { borderColor: 'var(--dsh-accent, #4d6bfe)' } : {})
+        }}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+          <strong title={session.sessionId}>{name}</strong>
+          {isScoped && <span style={chip}>this session</span>}
+          <span style={hint}>{session.active ? 'attached' : 'not attached'}</span>
+          {dir && (
+            <span style={chip} title={session.cwd}>
+              {dir}
+            </span>
+          )}
+          {typeof session.restorePoints === 'number' && session.restorePoints > 0 && (
+            <span style={chip}>{session.restorePoints} restore points</span>
+          )}
+        </div>
+        {session.advisors.length === 0 ? (
+          <>
+            <span style={hint}>No advisors are attached to this session.</span>
+            {matching.length > 0 ? (
+              <span style={hint}>
+                Configured for this workspace: {matching.map(entry => entry.name || 'unnamed').join(', ')} —
+                they attach on the session's next event once the master switch is on (Settings → Ward
+                Council → General).
+              </span>
+            ) : (
+              <span style={hint}>
+                No enabled advisor's workspace patterns match{session.cwd ? ' this workspace' : ''} — edit
+                them in Settings → Ward Council → Advisors / Workspaces.
+              </span>
+            )}
+          </>
+        ) : (
+          session.advisors.map(advisor => (
+            <div
+              key={advisor.name}
+              style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}
+            >
+              <span
+                title={advisor.status}
+                style={{
+                  width: 8,
+                  height: 8,
+                  borderRadius: '50%',
+                  background: STATUS_COLORS[advisor.status] ?? '#8a8a8a',
+                  display: 'inline-block'
+                }}
+              />
+              <span style={{ fontWeight: 600 }}>{advisor.name}</span>
+              <span style={hint}>{advisor.status}</span>
+              <span style={chip}>{advisor.reviewsCompleted} reviews</span>
+              <span style={chip}>{advisor.adviceDelivered} advice</span>
+              {advisor.backlog > 0 && <span style={chip}>{advisor.backlog} queued</span>}
+              {advisor.lastError && (
+                <span style={{ ...hint, color: '#dc7070' }} title={advisor.lastError}>
+                  ⚠ {advisor.lastError.length > 80 ? `${advisor.lastError.slice(0, 80)}…` : advisor.lastError}
+                </span>
+              )}
+            </div>
+          ))
+        )}
+      </div>
+    )
+  }
 
   return (
     <div style={panel}>
@@ -211,48 +354,7 @@ function AdvisorsMonitorTab(): React.ReactElement {
           </span>
         </div>
       ) : (
-        sessions.map(session => (
-          <div key={session.sessionId} style={cardStyle}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-              <strong title={session.sessionId}>Session {session.sessionId.slice(0, 8)}</strong>
-              <span style={hint}>{session.active ? 'attached' : 'detached'}</span>
-              {typeof session.restorePoints === 'number' && session.restorePoints > 0 && (
-                <span style={chip}>{session.restorePoints} restore points</span>
-              )}
-            </div>
-            {session.advisors.length === 0 ? (
-              <span style={hint}>No advisors matched this session's workspace.</span>
-            ) : (
-              session.advisors.map(advisor => (
-                <div
-                  key={advisor.name}
-                  style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}
-                >
-                  <span
-                    title={advisor.status}
-                    style={{
-                      width: 8,
-                      height: 8,
-                      borderRadius: '50%',
-                      background: STATUS_COLORS[advisor.status] ?? '#8a8a8a',
-                      display: 'inline-block'
-                    }}
-                  />
-                  <span style={{ fontWeight: 600 }}>{advisor.name}</span>
-                  <span style={hint}>{advisor.status}</span>
-                  <span style={chip}>{advisor.reviewsCompleted} reviews</span>
-                  <span style={chip}>{advisor.adviceDelivered} advice</span>
-                  {advisor.backlog > 0 && <span style={chip}>{advisor.backlog} queued</span>}
-                  {advisor.lastError && (
-                    <span style={{ ...hint, color: '#dc7070' }} title={advisor.lastError}>
-                      ⚠ {advisor.lastError.length > 80 ? `${advisor.lastError.slice(0, 80)}…` : advisor.lastError}
-                    </span>
-                  )}
-                </div>
-              ))
-            )}
-          </div>
-        ))
+        sessions.map(renderSessionCard)
       )}
 
       <div style={cardStyle}>
@@ -381,7 +483,11 @@ export function mountAdvisorSidebarTab(ctx: {
           order: 60,
           single: true,
           badge,
-          component: () => React.createElement(AdvisorsMonitorTab)
+          component: (scopeProps: unknown) =>
+            React.createElement(AdvisorsMonitorTab, {
+              scopedSessionId: (scopeProps as { scope?: { sessionId?: string } } | undefined)?.scope
+                ?.sessionId
+            })
         })
         if (ctx.connection) releasePoll = acquire(ctx.connection)
         ctx.logger?.info?.('dsh-omp-advisor: registered Advisors tab in dsh-better-sidebar')

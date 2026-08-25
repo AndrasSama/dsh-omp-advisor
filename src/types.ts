@@ -146,6 +146,10 @@ export interface SessionAdvisorSnapshot {
   recentNotes: AdvisorNote[]
   /** Restore points recorded for this session (when restore points are on). */
   restorePoints?: number
+  /** Session title (latest session/title event), when known. Additive v0.6.3. */
+  title?: string
+  /** Workspace path of the session, when known. Additive v0.6.3. */
+  cwd?: string
 }
 
 /**
