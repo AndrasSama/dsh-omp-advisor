@@ -12,12 +12,26 @@
 import { randomUUID } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { ADVISE_TOOL_SCHEMA, AdviseGate } from './advise-tool'
+import { ADVISE_TOOL_SCHEMA, AdviseGate, type AdviceMeta } from './advise-tool'
 import { buildAdvisorQuarantineSourceText, quarantineAdvisorUnsafeOutput } from './quarantine'
-import { ADVISOR_TOOL_SCHEMAS, DEFAULT_ADVISOR_TOOL_NAMES, LOAD_SKILL_TOOL_SCHEMA, executeAdvisorTool } from './tools'
+import {
+  ADVISOR_TOOL_SCHEMAS,
+  DEFAULT_ADVISOR_TOOL_NAMES,
+  LOAD_SKILL_TOOL_SCHEMA,
+  RESTORE_POINT_TOOL_SCHEMAS,
+  executeAdvisorTool
+} from './tools'
+import {
+  commitInstructions,
+  listRestorePoints,
+  markRestorePointAccepted,
+  probeGit,
+  restoreInstructions
+} from './restore-points'
 import type { AdvisorEntry, AdvisorSeverity, LlmContentBlock, LlmLike, LlmStreamChunk } from './types'
 import systemPrompt from './prompts/system.md'
 import adviseToolPrompt from './prompts/advise-tool.md'
+import completionGatePrompt from './prompts/completion-gate.md'
 import contextFilesTemplate from './prompts/context-files.md'
 import { PACKAGED_SKILLS } from './skills.generated'
 
@@ -30,8 +44,14 @@ export interface AdvisorLoopHost {
   llm: LlmLike
   /** Absolute working directory of the watched session. */
   cwd: string
+  /** Session id scoping the restore-point ring. */
+  sessionId?: string
+  /** Grant the restore-point tools (list/diff) to this advisor. */
+  restorePointsEnabled?: boolean
+  /** Include the completion-gate protocol in the system prompt. */
+  completionGate?: boolean
   /** Called for every accepted advice note. */
-  onAdvice(note: string, severity: AdvisorSeverity | undefined, advisorName: string): void
+  onAdvice(note: string, severity: AdvisorSeverity | undefined, advisorName: string, meta?: AdviceMeta): void
   log?(message: string, meta?: Record<string, unknown>): void
 }
 
@@ -123,7 +143,7 @@ export class AdvisorLoop {
     private readonly host: AdvisorLoopHost,
     private entry: AdvisorEntry
   ) {
-    this.gate = new AdviseGate((note, severity) => host.onAdvice(note, severity, entry.name))
+    this.gate = new AdviseGate((note, severity, meta) => host.onAdvice(note, severity, entry.name, meta))
   }
 
   get advisorName(): string {
@@ -133,6 +153,11 @@ export class AdvisorLoop {
   /** Replace the entry when settings change (model, maxTurns, instructions). */
   updateEntry(entry: AdvisorEntry): void {
     this.entry = entry
+  }
+
+  /** Refresh host flags that settings changes may invalidate (restore points, completion gate). */
+  updateHostFlags(flags: Partial<Pick<AdvisorLoopHost, 'sessionId' | 'restorePointsEnabled' | 'completionGate'>>): void {
+    Object.assign(this.host, flags)
   }
 
   /** Drop the advisor's conversation (context loss / settings rebuild). The session cursor is owned by the runtime and stays. */
@@ -168,6 +193,7 @@ export class AdvisorLoop {
     const parts = [systemPrompt.trim()]
     if (this.contextFilesText) parts.push(this.contextFilesText)
     parts.push(`Tool reference for \`advise\`:\n${adviseToolPrompt.trim()}`)
+    if (this.host.completionGate !== false) parts.push(completionGatePrompt.trim())
     if (this.entry.instructions?.trim()) {
       parts.push(`<specialization>\n${this.entry.instructions.trim()}\n</specialization>`)
     }
@@ -207,6 +233,7 @@ export class AdvisorLoop {
     const toolSchemas = [
       ...ADVISOR_TOOL_SCHEMAS,
       ...(this.entry.skillMode === 'lazy' ? [LOAD_SKILL_TOOL_SCHEMA] : []),
+      ...(this.host.restorePointsEnabled ? [...RESTORE_POINT_TOOL_SCHEMAS] : []),
       ADVISE_TOOL_SCHEMA
     ] as { name: string; description: string; parameters: Record<string, unknown> }[]
 
@@ -254,7 +281,7 @@ export class AdvisorLoop {
       let producedAdvice = false
       for (const call of toolCalls) {
         if (call.name === 'advise') {
-          let args: { note?: unknown; severity?: unknown } = {}
+          let args: { note?: unknown; severity?: unknown; rewindTo?: unknown; acceptance?: unknown } = {}
           try {
             args = JSON.parse(call.arguments)
           } catch {
@@ -268,7 +295,47 @@ export class AdvisorLoop {
             args.severity === 'concern' || args.severity === 'blocker' || args.severity === 'nit'
               ? args.severity
               : undefined
-          const result = this.gate.advise(args.note, severity)
+
+          // Optional structured extras (validated; invalid values are rejected
+          // back to the advisor instead of delivered half-formed).
+          let meta: AdviceMeta | undefined
+          if (typeof args.rewindTo === 'string' && args.rewindTo.trim()) {
+            const points = await listRestorePoints(this.host.cwd, this.host.sessionId)
+            const target = points.find(point => point.id === args.rewindTo || point.sha.startsWith(String(args.rewindTo)))
+            if (!target) {
+              this.messages.push(
+                toolResultMessage(
+                  call.id,
+                  `unknown restore point "${String(args.rewindTo)}" — call list_restore_points for valid ids and resubmit.`,
+                  true
+                )
+              )
+              continue
+            }
+            if (!/do not repeat/i.test(args.note) || !/keep/i.test(args.note)) {
+              this.messages.push(
+                toolResultMessage(
+                  call.id,
+                  'A rewind advisory must classify the steps: include a "Do not repeat:" section (the destructive/wrong steps) and a "Keep (progress):" section (steps worth preserving). Resubmit with both.',
+                  true
+                )
+              )
+              continue
+            }
+            meta = { ...(meta ?? {}), rewindTo: { id: target.id, sha: target.sha, turn: target.turn } }
+          }
+          if (args.acceptance === 'completed' || args.acceptance === 'compromise-accepted') {
+            meta = { ...(meta ?? {}), acceptance: args.acceptance }
+            const points = await listRestorePoints(this.host.cwd, this.host.sessionId)
+            if (points.length > 0) {
+              await markRestorePointAccepted(this.host.cwd, points[0]).catch(() => false)
+            }
+            const probe = await probeGit(this.host.cwd)
+            const summary = args.note.trim().split('\n')[0].slice(0, 120)
+            meta.commitHint = commitInstructions(probe.branch, summary)
+          }
+
+          const result = this.gate.advise(args.note, severity, meta)
           if (result.delivered || result.deferred) producedAdvice = true
           this.messages.push(toolResultMessage(call.id, result.modelReply, false))
           continue
@@ -277,7 +344,7 @@ export class AdvisorLoop {
           this.messages.push(toolResultMessage(call.id, `Tool not available: ${call.name}`, true))
           continue
         }
-        const result = await executeAdvisorTool({ cwd: this.host.cwd }, call.name, call.arguments)
+        const result = await executeAdvisorTool({ cwd: this.host.cwd, sessionId: this.host.sessionId }, call.name, call.arguments)
         this.messages.push(toolResultMessage(call.id, result.text, result.isError === true))
         this.trackSize(result.text)
       }

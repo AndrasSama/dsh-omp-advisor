@@ -1,5 +1,9 @@
 /** Unit tests for the dsh-omp-advisor core semantics. */
 import assert from 'node:assert/strict'
+import { execSync } from 'node:child_process'
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { test } from 'node:test'
 import {
   AdviseGate,
@@ -17,7 +21,15 @@ import {
   executeAdvisorTool,
   registerAdvisorRpc,
   RPC_CHANNEL,
-  DEFAULT_ADVISOR_TOOL_NAMES
+  DEFAULT_ADVISOR_TOOL_NAMES,
+  probeGit,
+  createRestorePoint,
+  listRestorePoints,
+  diffRestorePoints,
+  pruneRestorePoints,
+  markRestorePointAccepted,
+  restoreInstructions,
+  commitInstructions
 } from './.bundle.mjs'
 
 /* -------------------------------- AdviseGate -------------------------------- */
@@ -1205,6 +1217,7 @@ test('inject skill mode keeps full bodies and withholds load_skill', async () =>
 function mockHostCtx({ raw, llm, agents }) {
   const handlers = {}
   let current = raw
+  const watchers = []
   return {
     emit(event, ...args) {
       for (const handler of handlers[event] ?? []) handler(...args)
@@ -1218,12 +1231,19 @@ function mockHostCtx({ raw, llm, agents }) {
           // DSH scopes store the value; `validate` is a pure validator that
           // throws on bad input and returns nothing — get() yields the raw value.
           get: () => current,
-          watch() {
-            return () => {}
+          watch(cb) {
+            watchers.push(cb)
+            return () => {
+              const i = watchers.indexOf(cb)
+              if (i >= 0) watchers.splice(i, 1)
+            }
           },
           update(patch) {
+            const prev = current
             current = { ...current, ...patch }
             options?.validate?.(current)
+            // Real DSH scopes notify watchers after a successful update.
+            for (const cb of [...watchers]) cb(current, prev)
           }
         }
       }
@@ -1349,4 +1369,452 @@ test('service end-to-end: failed primary turn receives the auto-continue followu
   assert.equal(agent.followups.length, 1)
   assert.match(agent.followups[0].text, /continue from where you left off/i)
   assert.match(agent.followups[0].text, /server_selection_failed/)
+})
+
+/* --------------------------- restore points: git engine --------------------------- */
+/*
+ * These run against REAL temporary git repositories: the engine must snapshot
+ * the worktree (tracked + untracked) into hidden refs without ever touching
+ * the user's index, HEAD, branch, or files.
+ */
+
+function makeGitRepo() {
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-omp-advisor-rp-'))
+  execSync('git init -q .', { cwd: dir })
+  // Explicit identity: CI containers often ship without a global user.email/name.
+  execSync('git config user.email test@test.t', { cwd: dir })
+  execSync('git config user.name test', { cwd: dir })
+  writeFileSync(join(dir, 'base.txt'), 'base\n')
+  execSync('git add -A', { cwd: dir })
+  execSync('git commit -qm base', { cwd: dir })
+  return dir
+}
+
+/** True when a usable git binary exists; git-backed tests skip otherwise. */
+const HAS_GIT = (() => {
+  try {
+    execSync('git --version', { stdio: 'ignore' })
+    return true
+  } catch {
+    return false
+  }
+})()
+const SKIP_NO_GIT = { skip: !HAS_GIT && 'git binary not available' }
+
+function gitOut(dir, cmd) {
+  return execSync(cmd, { cwd: dir, encoding: 'utf8' }).trim()
+}
+
+test('restore points: snapshot captures tracked+untracked without touching user state', SKIP_NO_GIT, async () => {
+  const dir = makeGitRepo()
+  try {
+    // Work in progress: a tracked edit + an untracked file.
+    writeFileSync(join(dir, 'base.txt'), 'base\nmore\n')
+    writeFileSync(join(dir, 'new.txt'), 'untracked\n')
+    const statusBefore = gitOut(dir, 'git status --short')
+    const headBefore = gitOut(dir, "git log -1 '--format=%H %s'")
+    const branchBefore = gitOut(dir, 'git branch --show-current')
+
+    const point = await createRestorePoint(dir, { session: 's1', turn: 1, label: 'turn' })
+    assert.ok(point, 'restore point created')
+    assert.match(point.sha, /^[0-9a-f]{40}$/)
+
+    // User state untouched.
+    assert.equal(gitOut(dir, 'git status --short'), statusBefore)
+    assert.equal(gitOut(dir, "git log -1 '--format=%H %s'"), headBefore)
+    assert.equal(gitOut(dir, 'git branch --show-current'), branchBefore)
+
+    // Snapshot tree contains both the tracked edit and the untracked file.
+    const treeFiles = gitOut(dir, `git ls-tree -r --name-only ${point.sha}`)
+    assert.match(treeFiles, /base\.txt/)
+    assert.match(treeFiles, /new\.txt/)
+
+    // Hidden ref namespace only — no branch or stash entry created.
+    const refs = gitOut(dir, "git for-each-ref '--format=%(refname)'")
+    assert.match(refs, /refs\/dsh-omp-advisor\/restore\/s1\//)
+    assert.doesNotMatch(gitOut(dir, 'git branch --list'), /dsh-omp-advisor/)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('restore points: ring lists newest-first with metadata and diff stats', SKIP_NO_GIT, async () => {
+  const dir = makeGitRepo()
+  try {
+    const p1 = await createRestorePoint(dir, { session: 's1', turn: 1, label: 'turn' })
+    writeFileSync(join(dir, 'change.txt'), 'one\n')
+    const p2 = await createRestorePoint(dir, { session: 's1', turn: 2, label: 'turn', parentSha: p1.sha })
+    assert.ok(p1 && p2)
+
+    const points = await listRestorePoints(dir, 's1', { withStats: true })
+    assert.equal(points.length, 2)
+    assert.equal(points[0].sha, p2.sha) // newest first
+    assert.equal(points[0].turn, 2)
+    assert.equal(points[1].sha, p1.sha)
+    assert.match(points[0].stat ?? '', /change\.txt/) // diff vs parent
+
+    const diff = await diffRestorePoints(dir, p1.sha, p2.sha)
+    assert.match(diff, /change\.txt/)
+    assert.match(diff, /### Stat/)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('restore points: skips snapshot when tree unchanged since parent', SKIP_NO_GIT, async () => {
+  const dir = makeGitRepo()
+  try {
+    const p1 = await createRestorePoint(dir, { session: 's1', turn: 1, label: 'turn' })
+    assert.ok(p1)
+    const p2 = await createRestorePoint(dir, { session: 's1', turn: 2, label: 'turn', parentSha: p1.sha })
+    assert.equal(p2, null, 'identical tree produces no new point')
+    const points = await listRestorePoints(dir, 's1')
+    assert.equal(points.length, 1)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('restore points: prune keeps the newest N', SKIP_NO_GIT, async () => {
+  const dir = makeGitRepo()
+  try {
+    let parent
+    for (let i = 1; i <= 4; i++) {
+      writeFileSync(join(dir, `f${i}.txt`), `${i}\n`)
+      parent = await createRestorePoint(dir, { session: 's1', turn: i, label: 'turn', parentSha: parent?.sha })
+    }
+    assert.equal((await listRestorePoints(dir, 's1')).length, 4)
+    const removed = await pruneRestorePoints(dir, 2, 's1')
+    assert.equal(removed, 2)
+    const remaining = await listRestorePoints(dir, 's1')
+    assert.equal(remaining.length, 2)
+    assert.equal(remaining[0].turn, 4) // newest survived
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('restore points: markRestorePointAccepted adds an accepted ref', SKIP_NO_GIT, async () => {
+  const dir = makeGitRepo()
+  try {
+    const point = await createRestorePoint(dir, { session: 's1', turn: 1, label: 'turn' })
+    assert.ok(point)
+    assert.equal(await markRestorePointAccepted(dir, point), true)
+    const refs = gitOut(dir, "git for-each-ref '--format=%(refname)'")
+    assert.match(refs, /refs\/dsh-omp-advisor\/accepted\/s1\//)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('restore points: non-git workspace is unavailable', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-omp-advisor-nogit-'))
+  try {
+    const probe = await probeGit(dir)
+    assert.equal(probe.repo, false)
+    assert.equal(await createRestorePoint(dir, { session: 's1' }), null)
+    assert.deepEqual(await listRestorePoints(dir, 's1'), [])
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('restore points: instruction text carries the worktree-only recipe', SKIP_NO_GIT, async () => {
+  const dir = makeGitRepo()
+  try {
+    const point = await createRestorePoint(dir, { session: 's1', turn: 3, label: 'turn' })
+    const text = restoreInstructions(point)
+    assert.match(text, /git restore --source=/)
+    assert.match(text, /--worktree --staged/)
+    assert.match(text, /never|kept/i) // post-point files are kept, not deleted
+    const commit = commitInstructions('feature-x', 'done: the thing')
+    assert.match(commit, /feature-x/)
+    assert.match(commit, /git commit/)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+/* --------------------------- restore points: settings --------------------------- */
+
+test('settings: restore point + completion gate defaults and clamps', () => {
+  const defaults = normalizeSettings({})
+  assert.equal(defaults.restorePoints, false) // opt-in
+  assert.equal(defaults.restorePointKeep, 20)
+  assert.equal(defaults.restorePointOnMutation, true)
+  assert.equal(defaults.completionGate, true) // on by default
+
+  const clamped = normalizeSettings({ restorePoints: true, restorePointKeep: 500, completionGate: false })
+  assert.equal(clamped.restorePointKeep, 100)
+  assert.equal(clamped.completionGate, false)
+  const low = normalizeSettings({ restorePointKeep: 0 })
+  assert.equal(low.restorePointKeep, 1)
+
+  const lenient = normalizeSettingsLenient({ restorePoints: true, restorePointKeep: 7 })
+  assert.equal(lenient.restorePoints, true)
+  assert.equal(lenient.restorePointKeep, 7)
+})
+
+/* --------------------------- restore points: delivery meta --------------------------- */
+
+test('delivery renders rewind and accepted sections from note meta', () => {
+  const body = formatAdvisorBatchContent([
+    {
+      note: 'Rewind before the bad migration. Do not repeat: the drop table. Keep (progress): the schema module.',
+      severity: 'blocker',
+      advisor: 'sentinel',
+      meta: { rewindTo: { id: '123-abc', sha: 'a'.repeat(40), turn: 2 } }
+    },
+    {
+      note: 'Work verified complete.',
+      advisor: 'sentinel',
+      meta: { acceptance: 'completed', commitHint: 'git add -A\ngit commit -m "done"' }
+    }
+  ])
+  assert.match(body, /<rewind point="123-abc">/)
+  assert.match(body, /git restore --source=/)
+  assert.match(body, /<accepted state="completed">/)
+  assert.match(body, /git commit/)
+})
+
+/* --------------------------- restore points: advise extensions --------------------------- */
+
+function makeLoopWithRepo({ dir, sessionId = 's1', llm, onAdvice }) {
+  return new AdvisorLoop(
+    {
+      llm,
+      cwd: dir,
+      sessionId,
+      restorePointsEnabled: true,
+      completionGate: true,
+      onAdvice
+    },
+    { ...baseEntry, maxTurns: 3 }
+  )
+}
+
+test('advise rewindTo rejects unknown ids and missing classification', SKIP_NO_GIT, async () => {
+  const dir = makeGitRepo()
+  try {
+    const point = await createRestorePoint(dir, { session: 's1', turn: 1, label: 'turn' })
+    const delivered = []
+    // Turn 1: unknown id. Turn 2: valid id but no classification sections. Turn 3: silent.
+    const llm = mockLlm([
+      [
+        {
+          type: 'tool-call',
+          id: 'c1',
+          name: 'advise',
+          arguments: JSON.stringify({ note: 'rewind now', severity: 'blocker', rewindTo: 'nope-999' })
+        }
+      ],
+      [
+        {
+          type: 'tool-call',
+          id: 'c2',
+          name: 'advise',
+          arguments: JSON.stringify({ note: 'rewind please', severity: 'blocker', rewindTo: point.id })
+        }
+      ],
+      [{ type: 'text', text: 'done' }]
+    ])
+    const loop = makeLoopWithRepo({ dir, llm, onAdvice: (note, severity, advisor, meta) => delivered.push({ note, severity, meta }) })
+    await loop.review('## Update 1\n\n### User\nbroke the db', { inProgress: false, signal: new AbortController().signal })
+
+    assert.equal(delivered.length, 0, 'neither malformed advise call was delivered')
+    const results = llm.calls.slice(1).flatMap(c => c.messages.flatMap(m => m.content)).filter(b => b.type === 'tool-result')
+    assert.match(results[0].content[0].text, /unknown restore point/)
+    assert.match(results[1].content[0].text, /Do not repeat/)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('advise rewindTo delivers meta with the validated point', SKIP_NO_GIT, async () => {
+  const dir = makeGitRepo()
+  try {
+    const point = await createRestorePoint(dir, { session: 's1', turn: 1, label: 'turn' })
+    const delivered = []
+    const llm = mockLlm([
+      [
+        {
+          type: 'tool-call',
+          id: 'c1',
+          name: 'advise',
+          arguments: JSON.stringify({
+            note: 'Rewind. Do not repeat: the forced push to main. Keep (progress): the new parser module.',
+            severity: 'blocker',
+            rewindTo: point.id
+          })
+        }
+      ]
+    ])
+    const loop = makeLoopWithRepo({ dir, llm, onAdvice: (note, severity, advisor, meta) => delivered.push({ note, severity, meta }) })
+    await loop.review('## Update 1\n\n### User\noops', { inProgress: false, signal: new AbortController().signal })
+
+    assert.equal(delivered.length, 1)
+    assert.equal(delivered[0].severity, 'blocker')
+    assert.equal(delivered[0].meta?.rewindTo?.sha, point.sha)
+    assert.equal(delivered[0].meta?.rewindTo?.turn, 1)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('advise acceptance marks the latest point and attaches a commit hint', SKIP_NO_GIT, async () => {
+  const dir = makeGitRepo()
+  try {
+    await createRestorePoint(dir, { session: 's1', turn: 1, label: 'turn' })
+    const delivered = []
+    const llm = mockLlm([
+      [
+        {
+          type: 'tool-call',
+          id: 'c1',
+          name: 'advise',
+          arguments: JSON.stringify({ note: 'Feature verified complete.', acceptance: 'completed' })
+        }
+      ]
+    ])
+    const loop = makeLoopWithRepo({ dir, llm, onAdvice: (note, severity, advisor, meta) => delivered.push({ note, meta }) })
+    await loop.review('## Update 1\n\n### User\nall done', { inProgress: false, signal: new AbortController().signal })
+
+    assert.equal(delivered.length, 1)
+    assert.equal(delivered[0].meta?.acceptance, 'completed')
+    assert.match(delivered[0].meta?.commitHint ?? '', /git commit/)
+    const refs = gitOut(dir, "git for-each-ref '--format=%(refname)'")
+    assert.match(refs, /refs\/dsh-omp-advisor\/accepted\//)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('restore point tools are granted only when enabled, and the completion gate prompt follows its flag', SKIP_NO_GIT, async () => {
+  const dir = makeGitRepo()
+  try {
+    const llmOn = mockLlm([[{ type: 'text', text: 'ok' }]])
+    const loopOn = makeLoopWithRepo({ dir, llm: llmOn, onAdvice: () => {} })
+    await loopOn.review('## Update 1\n\n### User\nhi', { inProgress: false, signal: new AbortController().signal })
+    const namesOn = llmOn.calls[0].tools.map(t => t.name)
+    assert.ok(namesOn.includes('list_restore_points'))
+    assert.ok(namesOn.includes('diff_restore_points'))
+    assert.match(llmOn.calls[0].system, /Completion gate/)
+
+    const llmOff = mockLlm([[{ type: 'text', text: 'ok' }]])
+    const loopOff = new AdvisorLoop(
+      { llm: llmOff, cwd: dir, sessionId: 's1', restorePointsEnabled: false, completionGate: false, onAdvice: () => {} },
+      { ...baseEntry, maxTurns: 2 }
+    )
+    await loopOff.review('## Update 1\n\n### User\nhi', { inProgress: false, signal: new AbortController().signal })
+    const namesOff = llmOff.calls[0].tools.map(t => t.name)
+    assert.ok(!namesOff.includes('list_restore_points'))
+    assert.doesNotMatch(llmOff.calls[0].system, /Completion gate/)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+/* --------------------------- restore points: advisor tools --------------------------- */
+
+test('list_restore_points and diff_restore_points tools work against the session ring', SKIP_NO_GIT, async () => {
+  const dir = makeGitRepo()
+  try {
+    const p1 = await createRestorePoint(dir, { session: 's1', turn: 1, label: 'turn' })
+    writeFileSync(join(dir, 'x.txt'), 'x\n')
+    const p2 = await createRestorePoint(dir, { session: 's1', turn: 2, label: 'turn', parentSha: p1.sha })
+
+    const list = await executeAdvisorTool({ cwd: dir, sessionId: 's1' }, 'list_restore_points', '')
+    assert.match(list.text, /id=/)
+    assert.match(list.text, /turn=2/)
+
+    const diff = await executeAdvisorTool(
+      { cwd: dir, sessionId: 's1' },
+      'diff_restore_points',
+      JSON.stringify({ a: p1.id, b: p2.id })
+    )
+    assert.match(diff.text, /x\.txt/)
+
+    const bad = await executeAdvisorTool(
+      { cwd: dir, sessionId: 's1' },
+      'diff_restore_points',
+      JSON.stringify({ a: 'ghost', b: p2.id })
+    )
+    assert.equal(bad.isError, true)
+    assert.match(bad.text, /unknown restore point/)
+
+    // A different session sees no points (ring is session-scoped).
+    const other = await executeAdvisorTool({ cwd: dir, sessionId: 'other' }, 'list_restore_points', '')
+    assert.match(other.text, /no restore points/)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+/* --------------------------- restore points: service wiring --------------------------- */
+
+test('service end-to-end: turn/end creates a restore point when enabled', SKIP_NO_GIT, async () => {
+  const dir = makeGitRepo()
+  try {
+    const events = [{ type: 'user/message', data: { content: [{ type: 'text', text: 'do work' }] } }]
+    const agent = serviceAgent(events)
+    const llm = scriptedLlm([[{ type: 'text', text: 'ok' }]])
+    const raw = { ...serviceBaseRaw, restorePoints: true, restorePointKeep: 5 }
+    const ctx = mockHostCtx({ raw, llm, agents: new Map([['s1', agent]]) })
+    const service = new AdvisorService(ctx, {})
+    const session = { id: 's1', header: { cwd: dir }, events }
+
+    writeFileSync(join(dir, 'work.txt'), 'progress\n')
+    ctx.emit('session/created', session)
+    ctx.emit('session/event', session, { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
+    await new Promise(resolve => setTimeout(resolve, 400))
+
+    const refs = gitOut(dir, "git for-each-ref '--format=%(refname)'")
+    assert.match(refs, /refs\/dsh-omp-advisor\/restore\/s1\//)
+    assert.equal(service.snapshot('s1').restorePoints, 1)
+    // User state untouched by the snapshot itself.
+    assert.equal(gitOut(dir, 'git log -1 --format=%s'), 'base')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('service: pre-mutation listener snapshots then always calls next', SKIP_NO_GIT, async () => {
+  const dir = makeGitRepo()
+  try {
+    const events = []
+    const agent = serviceAgent(events)
+    const llm = scriptedLlm([])
+    const raw = { ...serviceBaseRaw, restorePoints: true }
+    const ctx = mockHostCtx({ raw, llm, agents: new Map([['s1', agent]]) })
+    const service = new AdvisorService(ctx, {})
+    const session = { id: 's1', header: { cwd: dir }, events }
+    ctx.emit('session/created', session)
+
+    writeFileSync(join(dir, 'pre.txt'), 'before mutation\n')
+    let nextCalled = false
+    const exec = { name: 'write', agent: { session } }
+    ctx.emit('fs/write-intent', { key: 'target' }, exec, () => {
+      nextCalled = true
+    })
+    await new Promise(resolve => setTimeout(resolve, 400))
+
+    assert.equal(nextCalled, true, 'the tool path is never blocked')
+    const refs = gitOut(dir, "git for-each-ref '--format=%(refname)'")
+    assert.match(refs, /refs\/dsh-omp-advisor\/restore\/s1\//)
+
+    // Restore points disabled => no snapshot, next still called. Driven
+    // through the settings scope update (watchers now fire in the mock).
+    service['settingsScope'].update({ restorePoints: false })
+    service['lastMutationSnapshot'].clear()
+    const refsBefore = gitOut(dir, "git for-each-ref '--format=%(refname)'")
+    let nextAgain = false
+    ctx.emit('fs/write-intent', { key: 'target' }, exec, () => {
+      nextAgain = true
+    })
+    await new Promise(resolve => setTimeout(resolve, 50))
+    assert.equal(nextAgain, true)
+    assert.equal(gitOut(dir, "git for-each-ref '--format=%(refname)'"), refsBefore, 'no snapshot while disabled')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
 })

@@ -141,6 +141,11 @@ export class SessionAdvisorRuntime {
       if (existing) {
         existing.entry = entry
         existing.loop.updateEntry(entry)
+        existing.loop.updateHostFlags({
+          sessionId: this.host.sessionId,
+          restorePointsEnabled: settings.restorePoints === true,
+          completionGate: settings.completionGate !== false
+        })
         if (existing.status === 'halted' || existing.status === 'error') {
           // Settings changed: give the advisor a fresh chance.
           existing.status = entry.enabled === false ? 'paused' : 'running'
@@ -161,7 +166,10 @@ export class SessionAdvisorRuntime {
           {
             llm: this.host.llm,
             cwd: this.host.cwd,
-            onAdvice: (note, severity, advisorName) => this.deliver(note, severity, advisorName),
+            sessionId: this.host.sessionId,
+            restorePointsEnabled: settings.restorePoints === true,
+            completionGate: settings.completionGate !== false,
+            onAdvice: (note, severity, advisorName, meta) => this.deliver(note, severity, advisorName, meta),
             log: this.host.log
           },
           entry
@@ -312,8 +320,8 @@ export class SessionAdvisorRuntime {
    * coalesce window and emitted as one batched message; an interrupting note
    * flushes the whole batch immediately so a blocker never waits.
    */
-  private deliver(note: string, severity: AdvisorSeverity | undefined, advisorName: string): void {
-    const advisorNote: AdvisorNote = { note, severity, advisor: advisorName }
+  private deliver(note: string, severity: AdvisorSeverity | undefined, advisorName: string, meta?: AdvisorNote['meta']): void {
+    const advisorNote: AdvisorNote = { note, severity, advisor: advisorName, ...(meta ? { meta } : {}) }
     this.recentNotes.push(advisorNote)
     if (this.recentNotes.length > RECENT_NOTES_LIMIT) this.recentNotes.shift()
 

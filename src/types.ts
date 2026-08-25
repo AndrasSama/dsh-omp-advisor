@@ -16,6 +16,15 @@ export interface AdvisorNote {
   severity?: AdvisorSeverity
   /** Which configured advisor produced this note. */
   advisor?: string
+  /**
+   * Structured extras validated by the advisor loop (rewind recommendation,
+   * completion-gate acceptance + commit hint). Rendered into the advisory.
+   */
+  meta?: {
+    rewindTo?: { id: string; sha: string; turn?: number }
+    acceptance?: 'completed' | 'compromise-accepted'
+    commitHint?: string
+  }
 }
 
 /** How one advisor note reaches the primary agent. */
@@ -84,6 +93,24 @@ export interface AdvisorSettings {
    */
   interveneOnBlocker: boolean
   /**
+   * Git restore points: snapshot the workspace (side-effect-free git
+   * objects under refs/dsh-omp-advisor/**) at turn boundaries and, with
+   * `restorePointOnMutation`, before mutating tools. Advisors can list/diff
+   * points and recommend rewinds; the primary model executes restores.
+   */
+  restorePoints: boolean
+  /** How many restore points to keep per session (oldest pruned). */
+  restorePointKeep: number
+  /** Also snapshot before mutating tools (fs intents + configured tools). */
+  restorePointOnMutation: boolean
+  /**
+   * Completion gate: prompt protocol making the advisor verify the user's
+   * ask is actually implemented before the agent claims completion, demand
+   * honest done/not-done reporting otherwise, and remind the agent to
+   * commit the accepted state to its working branch.
+   */
+  completionGate: boolean
+  /**
    * Skip reviews whose rendered delta is smaller than this many characters
    * (0 = review everything). Skipped deltas are not replayed later.
    */
@@ -117,6 +144,8 @@ export interface SessionAdvisorSnapshot {
   active: boolean
   advisors: AdvisorStatusView[]
   recentNotes: AdvisorNote[]
+  /** Restore points recorded for this session (when restore points are on). */
+  restorePoints?: number
 }
 
 /* --------------------------- DSH runtime seams ----------------------------- */
@@ -205,7 +234,7 @@ export interface CordisContextLike {
     warn?(...args: unknown[]): void
     debug?(...args: unknown[]): void
   }
-  on(event: string, listener: (...args: any[]) => unknown): () => void
+  on(event: string, listener: (...args: any[]) => unknown, options?: { prepend?: boolean }): () => void
   effect(factory: () => unknown, label?: string): void
   get?(name: string): unknown
 }

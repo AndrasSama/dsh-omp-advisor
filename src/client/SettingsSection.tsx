@@ -41,6 +41,10 @@ interface SettingsView {
   autoRetryDelayMs: number
   autoRetryMax: number
   interveneOnBlocker: boolean
+  restorePoints: boolean
+  restorePointKeep: number
+  restorePointOnMutation: boolean
+  completionGate: boolean
   minDeltaChars: number
   advisors: AdvisorEntryView[]
 }
@@ -55,7 +59,7 @@ interface AdvisorStatusView {
 }
 
 interface SnapshotView {
-  sessions?: { sessionId: string; active: boolean; advisors: AdvisorStatusView[] }[]
+  sessions?: { sessionId: string; active: boolean; advisors: AdvisorStatusView[]; restorePoints?: number }[]
   settings: SettingsView
 }
 
@@ -814,6 +818,74 @@ export function createSettingsSection(ctx: ClientCtx): React.ComponentType<{ clo
             </span>
           </div>
           <div style={styles.row}>
+            <span style={styles.label}>Restore points</span>
+            <label>
+              <input
+                type="checkbox"
+                checked={value.restorePoints === true}
+                onChange={event => write('restorePoints', event.target.checked)}
+              />{' '}
+              snapshot the workspace with git so advisors can recommend rewinds
+            </label>
+          </div>
+          <div style={styles.row}>
+            <span style={styles.label} />
+            <span style={styles.hint}>
+              Side-effect-free git objects under refs/dsh-omp-advisor/** — your index, HEAD, branch, and files
+              are never touched. Captured at turn boundaries; keep{' '}
+              <input
+                type="number"
+                min={1}
+                max={100}
+                step={1}
+                style={{ ...styles.input, width: 60 }}
+                value={value.restorePointKeep ?? 20}
+                onChange={event => {
+                  const parsed = Number.parseInt(event.target.value, 10)
+                  if (Number.isFinite(parsed)) {
+                    write('restorePointKeep', Math.min(100, Math.max(1, parsed)))
+                  }
+                }}
+              />{' '}
+              per session.{' '}
+              <label>
+                <input
+                  type="checkbox"
+                  checked={value.restorePointOnMutation !== false}
+                  onChange={event => write('restorePointOnMutation', event.target.checked)}
+                />{' '}
+                also snapshot before mutating tools
+              </label>
+            </span>
+          </div>
+          <div style={styles.row}>
+            <span style={styles.label} />
+            <span style={{ ...styles.hint, opacity: 0.75 }}>
+              Rewinds are advice: the advisor names the restore point and which steps were destructive vs
+              progress; the main model runs the restore itself. Files created after a point are kept, never
+              deleted. Non-git workspaces are skipped.
+            </span>
+          </div>
+          <div style={styles.row}>
+            <span style={styles.label}>Completion gate</span>
+            <label>
+              <input
+                type="checkbox"
+                checked={value.completionGate !== false}
+                onChange={event => write('completionGate', event.target.checked)}
+              />{' '}
+              verify work is actually done before the agent claims completion
+            </label>
+          </div>
+          <div style={styles.row}>
+            <span style={styles.label} />
+            <span style={{ ...styles.hint, opacity: 0.75 }}>
+              On by default (prompt-only). If the ask is not fully implemented, the advisor instructs the agent
+              to report honestly what was and wasn't done and ask you; once complete — or once you accept the
+              compromise — it reminds the agent to commit the accepted state to its working branch.
+            </span>
+          </div>
+          <div style={styles.row}>
             <span style={styles.label}>Skip tiny deltas (chars)</span>
             <input
               type="number"
@@ -891,7 +963,10 @@ export function createSettingsSection(ctx: ClientCtx): React.ComponentType<{ clo
           ) : (
             (view?.sessions ?? []).map(session => (
               <div key={session.sessionId} style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                <span style={styles.hint}>session {session.sessionId}</span>
+                <span style={styles.hint}>
+                  session {session.sessionId}
+                  {typeof session.restorePoints === 'number' ? ` · ${session.restorePoints} restore points` : ''}
+                </span>
                 <div style={styles.row}>
                   {session.advisors.map(advisor => (
                     <span key={advisor.name} style={styles.chip} title={advisor.lastError ?? ''}>

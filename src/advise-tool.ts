@@ -13,6 +13,19 @@ import type { AdvisorSeverity } from './types'
 
 const SEVERITY_RANK: Record<AdvisorSeverity, number> = { nit: 1, concern: 2, blocker: 3 }
 
+/**
+ * Structured extras an advisor may attach to an advice note (validated by
+ * the loop before delivery; the runtime renders them into the advisory).
+ */
+export interface AdviceMeta {
+  /** Validated restore point the advisor recommends rewinding to. */
+  rewindTo?: { id: string; sha: string; turn?: number }
+  /** Completion-gate acceptance signal for the current work state. */
+  acceptance?: 'completed' | 'compromise-accepted'
+  /** Commit recipe for the accepted state (branch + honest-report message). */
+  commitHint?: string
+}
+
 export function severityRank(severity: AdvisorSeverity | undefined): number {
   return SEVERITY_RANK[severity ?? 'nit']
 }
@@ -39,10 +52,10 @@ export class AdviseGate {
   /** Highest delivered severity rank per normalized note. */
   private deliveredRanks = new Map<string, number>()
   private inProgressUpdate = false
-  private deferredNotes: { key: string; note: string; severity?: AdvisorSeverity }[] = []
+  private deferredNotes: { key: string; note: string; severity?: AdvisorSeverity; meta?: AdviceMeta }[] = []
 
   constructor(
-    private readonly onAdvice: (note: string, severity?: AdvisorSeverity) => void
+    private readonly onAdvice: (note: string, severity?: AdvisorSeverity, meta?: AdviceMeta) => void
   ) {}
 
   /**
@@ -56,7 +69,7 @@ export class AdviseGate {
     if (wasInProgress && !inProgress && this.deferredNotes.length > 0) {
       const pending = this.deferredNotes
       this.deferredNotes = []
-      for (const item of pending) this.deliver(item.note, item.severity)
+      for (const item of pending) this.deliver(item.note, item.severity, item.meta)
     }
   }
 
@@ -73,14 +86,17 @@ export class AdviseGate {
   }
 
   /** Run one advise call through deferral + dedupe. */
-  advise(note: string, severity?: AdvisorSeverity): AdviseResult {
+  advise(note: string, severity?: AdvisorSeverity, meta?: AdviceMeta): AdviseResult {
     if (this.inProgressUpdate && severity !== 'blocker') {
       const key = dedupeKey(note)
       const pending = this.deferredNotes.find(item => item.key === key)
       if (!pending) {
-        this.deferredNotes.push({ key, note, severity })
-      } else if (severityRank(severity) > severityRank(pending.severity)) {
-        pending.severity = severity
+        this.deferredNotes.push({ key, note, severity, meta })
+      } else {
+        if (severityRank(severity) > severityRank(pending.severity)) {
+          pending.severity = severity
+        }
+        if (meta) pending.meta = meta
       }
       return {
         modelReply:
@@ -89,7 +105,7 @@ export class AdviseGate {
         deferred: true
       }
     }
-    const delivered = this.deliver(note, severity)
+    const delivered = this.deliver(note, severity, meta)
     return {
       modelReply: delivered ? 'Recorded.' : 'Duplicate advice ignored.',
       delivered,
@@ -98,13 +114,13 @@ export class AdviseGate {
   }
 
   /** Escalation-rank dedupe; returns true when the note was delivered. */
-  private deliver(note: string, severity?: AdvisorSeverity): boolean {
+  private deliver(note: string, severity?: AdvisorSeverity, meta?: AdviceMeta): boolean {
     const key = dedupeKey(note)
     const rank = severityRank(severity)
     const previousRank = this.deliveredRanks.get(key) ?? 0
     if (rank <= previousRank) return false
     this.deliveredRanks.set(key, rank)
-    this.onAdvice(note, severity)
+    this.onAdvice(note, severity, meta)
     return true
   }
 }
@@ -127,6 +143,17 @@ export const ADVISE_TOOL_SCHEMA = {
         type: 'string',
         enum: ['nit', 'concern', 'blocker'],
         description: 'How strongly to weigh this. Omit for a plain nit.'
+      },
+      rewindTo: {
+        type: 'string',
+        description:
+          'Optional restore point id (from list_restore_points) to recommend rewinding to after a destructive or wrong step. When set, the note MUST contain a "Do not repeat:" section naming the destructive steps and a "Keep (progress):" section naming the steps worth preserving.'
+      },
+      acceptance: {
+        type: 'string',
+        enum: ['completed', 'compromise-accepted'],
+        description:
+          'Completion gate only: set when the requested work is verified fully implemented (completed) or the user explicitly accepted the current partial state as a compromise (compromise-accepted). The advisory then reminds the agent to commit the accepted state to its working branch.'
       }
     }
   }

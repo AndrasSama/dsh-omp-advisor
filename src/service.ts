@@ -6,6 +6,7 @@
 import { Service } from '@deepseek-ai/cordis'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { registerAdvisorRpc } from './rpc'
+import { createRestorePoint, pruneRestorePoints } from './restore-points'
 import { SessionAdvisorRuntime } from './runtime'
 import {
   SETTINGS_NAMESPACE,
@@ -17,6 +18,13 @@ import {
 import type { AdvisorSettings, CordisContextLike, SessionAdvisorSnapshot, SessionLike } from './types'
 
 export const SERVICE_NAME = 'dsh-omp-advisor'
+
+/** Tool names snapshotted via tools/pre-execute (fs tools ride the intent events). */
+const MUTATION_TOOLS: ReadonlySet<string> = new Set(['bash', 'write', 'edit'])
+/** Max time a pre-mutation snapshot may hold the tool path (then the tool proceeds). */
+const MUTATION_SNAPSHOT_WAIT_MS = 3000
+/** Min gap between mutation-triggered snapshots per session. */
+const MUTATION_SNAPSHOT_THROTTLE_MS = 2000
 
 function sessionIdOf(session: SessionLike): string {
   return String(session.id)
@@ -36,6 +44,14 @@ export class AdvisorService extends Service {
   private runtimes = new Map<string, SessionAdvisorRuntime>()
   /** Session cwd per session id, for workspace-scoped advisor filtering. */
   private sessionCwds = new Map<string, string>()
+  /** Latest restore point sha per session (parent chaining for the ring). */
+  private lastPointSha = new Map<string, string>()
+  /** Per-session snapshot serialization (keeps parent chaining ordered). */
+  private snapshotLocks = new Map<string, Promise<void>>()
+  /** Throttle timestamps for mutation-triggered snapshots. */
+  private lastMutationSnapshot = new Map<string, number>()
+  /** Live restore-point counts per session for the snapshot surface. */
+  private restorePointCounts = new Map<string, number>()
   private settingsValue: AdvisorSettings
   private settingsScope: {
     get(): unknown
@@ -71,6 +87,27 @@ export class AdvisorService extends Service {
     })
     hostCtx.on('session/disposed', (session: SessionLike) => {
       this.detach(sessionIdOf(session))
+    })
+
+    // Pre-mutation restore points (checkpoint-rewind pattern): pass-through
+    // waterfall listeners that snapshot the workspace before a mutating tool
+    // runs. The snapshot wait is bounded — a tool is never blocked on git.
+    const snapshotBeforeExec = async (exec: unknown, label: string): Promise<void> => {
+      const session = (exec as { agent?: { session?: SessionLike } } | undefined)?.agent?.session
+      if (!session) return
+      const pending = this.snapshotWorkspace(session, label, { mutation: true })
+      if (!pending) return
+      await Promise.race([pending, new Promise(resolve => setTimeout(resolve, MUTATION_SNAPSHOT_WAIT_MS))])
+    }
+    hostCtx.on('fs/write-intent', (_target: unknown, exec: unknown, next: () => unknown) => {
+      return snapshotBeforeExec(exec, 'fs/write-intent').then(next)
+    })
+    hostCtx.on('fs/edit-intent', (_target: unknown, exec: unknown, next: () => unknown) => {
+      return snapshotBeforeExec(exec, 'fs/edit-intent').then(next)
+    })
+    hostCtx.on('tools/pre-execute', (exec: { name?: string; agent?: { session?: SessionLike } }, next: () => unknown) => {
+      if (!MUTATION_TOOLS.has(exec?.name ?? '')) return next()
+      return snapshotBeforeExec(exec, exec?.name ?? 'tool').then(next)
     })
 
     this.settingsScope.watch((next: unknown) => {
@@ -142,6 +179,54 @@ export class AdvisorService extends Service {
     return normalizeSettingsLenient(this.settingsScope.get())
   }
 
+  /**
+   * Create one restore point for a session's workspace (serialized per
+   * session so parent chaining stays ordered). Fire-and-forget for turn-end
+   * snapshots; pre-mutation callers await the returned promise with a bound.
+   * Returns undefined when restore points are off / not a mutation capture.
+   */
+  private snapshotWorkspace(
+    session: SessionLike,
+    label: string,
+    opts?: { mutation?: boolean; turn?: number }
+  ): Promise<void> | undefined {
+    if (!this.settingsValue.restorePoints) return undefined
+    if (opts?.mutation && this.settingsValue.restorePointOnMutation === false) return undefined
+    const id = sessionIdOf(session)
+    const cwd = this.sessionCwds.get(id) ?? sessionCwd(session)
+    if (opts?.mutation) {
+      const last = this.lastMutationSnapshot.get(id) ?? 0
+      if (Date.now() - last < MUTATION_SNAPSHOT_THROTTLE_MS) return undefined
+      this.lastMutationSnapshot.set(id, Date.now())
+    }
+    const run = async (): Promise<void> => {
+      try {
+        const point = await createRestorePoint(cwd, {
+          session: id,
+          turn: opts?.turn,
+          label,
+          parentSha: this.lastPointSha.get(id)
+        })
+        if (point) {
+          this.lastPointSha.set(id, point.sha)
+          await pruneRestorePoints(cwd, this.settingsValue.restorePointKeep || 20, id)
+          const count = this.restorePointCounts.get(id) ?? 0
+          this.restorePointCounts.set(id, Math.min(count + 1, this.settingsValue.restorePointKeep || 20))
+        }
+      } catch (err) {
+        this.hostCtx.logger?.debug?.(`${SERVICE_NAME}: restore point failed`, {
+          session: id,
+          label,
+          error: String(err)
+        })
+      }
+    }
+    const prev = this.snapshotLocks.get(id) ?? Promise.resolve()
+    const chained = prev.then(run, run)
+    this.snapshotLocks.set(id, chained)
+    return chained
+  }
+
   private attach(session: SessionLike): void {
     if (!this.settingsValue.enabled) return
     const id = sessionIdOf(session)
@@ -194,12 +279,19 @@ export class AdvisorService extends Service {
       runtime.enqueueReview(false)
       // Auto-retry hook: watch the turn outcome for primary-model failures.
       runtime.onTurnEnd((event.data as { reason?: unknown } | undefined)?.reason)
+      // Restore point at the turn boundary (fire-and-forget, serialized).
+      const turn = (event.data as { turn?: unknown } | undefined)?.turn
+      this.snapshotWorkspace(session, 'turn', { turn: typeof turn === 'number' ? turn : undefined })
     }
   }
 
   private detach(sessionId: string): void {
     const runtime = this.runtimes.get(sessionId)
     this.sessionCwds.delete(sessionId)
+    this.lastPointSha.delete(sessionId)
+    this.snapshotLocks.delete(sessionId)
+    this.lastMutationSnapshot.delete(sessionId)
+    this.restorePointCounts.delete(sessionId)
     if (!runtime) return
     runtime.dispose()
     this.runtimes.delete(sessionId)
@@ -211,7 +303,8 @@ export class AdvisorService extends Service {
     if (!runtime) {
       return { sessionId, active: false, advisors: [], recentNotes: [] }
     }
-    return { sessionId, ...runtime.snapshot() }
+    const count = this.restorePointCounts.get(sessionId)
+    return { sessionId, ...runtime.snapshot(), ...(count !== undefined ? { restorePoints: count } : {}) }
   }
 
   /** List sessions with attached advisor runtimes. */

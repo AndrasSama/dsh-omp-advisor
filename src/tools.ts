@@ -7,6 +7,7 @@
 import { readFile, readdir, stat } from 'node:fs/promises'
 import { resolve, relative, join } from 'node:path'
 import { PACKAGED_SKILLS } from './skills.generated'
+import { diffRestorePoints, listRestorePoints, probeGit, restoreInstructions } from './restore-points'
 
 const OUTPUT_LIMIT = 8000
 const MAX_GREP_FILES = 200
@@ -30,6 +31,8 @@ function clip(text: string): string {
 export interface AdvisorToolContext {
   /** Absolute working directory of the watched session. */
   cwd: string
+  /** Session id scoping the restore-point ring (when restore points are on). */
+  sessionId?: string
 }
 
 export interface AdvisorToolResult {
@@ -188,8 +191,50 @@ export const LOAD_SKILL_TOOL_SCHEMA = {
   }
 } as const
 
+/**
+ * Restore-point tools, granted when the session has git restore points
+ * enabled. Read-only: they list and diff snapshot objects under the hidden
+ * refs/dsh-omp-advisor/** namespace. Rewinds are recommended via `advise`
+ * and executed by the primary model, never by the advisor.
+ */
+export const RESTORE_POINT_TOOL_SCHEMAS = [
+  {
+    name: 'list_restore_points',
+    description:
+      'List this session\'s git restore points (newest first) with id, age, turn, label, and a short diff-stat vs the previous point. Use after a destructive or wrong step to find where to rewind to, and to compare the session baseline against the latest state when verifying completion.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      required: [],
+      properties: {}
+    }
+  },
+  {
+    name: 'diff_restore_points',
+    description:
+      'Show the changed paths and stat between two restore points (by id or sha prefix). Use it to classify what a span of steps changed: progress worth keeping vs destructive changes to undo.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['a', 'b'],
+      properties: {
+        a: { type: 'string', description: 'Older restore point id (or full sha).' },
+        b: { type: 'string', description: 'Newer restore point id (or full sha).' }
+      }
+    }
+  }
+] as const
+
 /** Names granted to advisors by default (the oh-my-pi default subset). */
-export const DEFAULT_ADVISOR_TOOL_NAMES: ReadonlySet<string> = new Set(['read', 'grep', 'glob', 'advise', 'load_skill'])
+export const DEFAULT_ADVISOR_TOOL_NAMES: ReadonlySet<string> = new Set([
+  'read',
+  'grep',
+  'glob',
+  'advise',
+  'load_skill',
+  'list_restore_points',
+  'diff_restore_points'
+])
 
 async function loadSkillTool(_ctx: AdvisorToolContext, args: { id: string }): Promise<AdvisorToolResult> {
   const id = String(args.id ?? '').trim()
@@ -204,6 +249,55 @@ async function loadSkillTool(_ctx: AdvisorToolContext, args: { id: string }): Pr
     }
   }
   return { text: clip(skill.body) }
+}
+
+async function listRestorePointsTool(ctx: AdvisorToolContext): Promise<AdvisorToolResult> {
+  const probe = await probeGit(ctx.cwd)
+  if (!probe.repo || probe.unborn) {
+    return { text: 'restore points unavailable: the watched workspace is not a usable git worktree', isError: true }
+  }
+  const points = await listRestorePoints(ctx.cwd, ctx.sessionId, { withStats: true })
+  if (points.length === 0) {
+    return {
+      text: 'no restore points recorded for this session yet (they are captured at turn boundaries and before mutating tools when enabled)'
+    }
+  }
+  const lines = points.map((point, index) => {
+    const ageMin = Math.max(0, Math.round((Date.now() - point.time) / 60000))
+    const head = `#${index + 1} id=${point.id} turn=${point.turn ?? '?'} label=${point.label ?? '-'} age=${ageMin}m sha=${point.sha.slice(0, 12)}`
+    return point.stat ? `${head}\n${point.stat}` : head
+  })
+  return { text: clip(lines.join('\n\n')) }
+}
+
+async function diffRestorePointsTool(
+  ctx: AdvisorToolContext,
+  args: { a: string; b: string }
+): Promise<AdvisorToolResult> {
+  const probe = await probeGit(ctx.cwd)
+  if (!probe.repo || probe.unborn) {
+    return { text: 'restore points unavailable: the watched workspace is not a usable git worktree', isError: true }
+  }
+  const points = await listRestorePoints(ctx.cwd, ctx.sessionId)
+  const resolvePoint = (key: string): string | null => {
+    const trimmed = String(key ?? '').trim()
+    if (!trimmed) return null
+    const byId = points.find(point => point.id === trimmed)
+    if (byId) return byId.sha
+    const byPrefix = points.find(point => point.sha.startsWith(trimmed) && trimmed.length >= 7)
+    return byPrefix ? byPrefix.sha : null
+  }
+  const shaA = resolvePoint(args.a)
+  const shaB = resolvePoint(args.b)
+  if (!shaA || !shaB) {
+    return {
+      text: `unknown restore point id: ${!shaA ? args.a : args.b}. Call list_restore_points for valid ids.`,
+      isError: true
+    }
+  }
+  const diff = await diffRestorePoints(ctx.cwd, shaA, shaB)
+  if (diff === null) return { text: 'diff failed for those restore points', isError: true }
+  return { text: clip(diff) }
 }
 
 /** Execute one advisor tool call. Unknown tools throw. */
@@ -234,6 +328,13 @@ export async function executeAdvisorTool(
       case 'load_skill':
         if (typeof args.id !== 'string') return { text: 'id is required', isError: true }
         return await loadSkillTool(ctx, args)
+      case 'list_restore_points':
+        return await listRestorePointsTool(ctx)
+      case 'diff_restore_points':
+        if (typeof args.a !== 'string' || typeof args.b !== 'string') {
+          return { text: 'a and b are required', isError: true }
+        }
+        return await diffRestorePointsTool(ctx, args)
       default:
         throw new Error(`unknown advisor tool: ${name}`)
     }

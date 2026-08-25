@@ -85,6 +85,30 @@ export const advisorSettingsSchema = z.object({
     .description(
       'Escalation: when an advisor raises a blocker while the primary agent is running, cancel the running step (undispatched tool calls are aborted) and wake the agent with the advisory. Off by default — advice stays advice.'
     ),
+  restorePoints: z
+    .boolean()
+    .default(false)
+    .description(
+      'Snapshot the workspace into side-effect-free git restore points (hidden refs under refs/dsh-omp-advisor/**) at turn boundaries, so advisors can recommend rewinds after destructive steps and verify completion against the session baseline. Your index/HEAD/branch are never touched; the primary model performs any restore.'
+    ),
+  restorePointKeep: z
+    .number()
+    .min(1)
+    .max(100)
+    .default(20)
+    .description('How many restore points to keep per session; oldest are pruned first.'),
+  restorePointOnMutation: z
+    .boolean()
+    .default(true)
+    .description(
+      'Also snapshot before mutating tools (fs write/edit intents and bash/write/edit executions). Best-effort: a bounded wait, never blocks your tools.'
+    ),
+  completionGate: z
+    .boolean()
+    .default(true)
+    .description(
+      'Completion gate: before the agent claims completion, the advisor verifies the ask is actually implemented, demands an honest done/not-done report otherwise, and reminds the agent to commit the accepted state to its working branch.'
+    ),
   minDeltaChars: z
     .number()
     .min(0)
@@ -112,6 +136,12 @@ function coerceAutoRetryDelayMs(raw: unknown): number {
 function coerceAutoRetryMax(raw: unknown): number {
   const value = typeof raw === 'number' && Number.isFinite(raw) ? raw : 3
   return Math.min(999, Math.max(0, Math.round(value)))
+}
+
+/** Clamp the restore-point retention to the schema bounds. */
+function coerceRestorePointKeep(raw: unknown): number {
+  const value = typeof raw === 'number' && Number.isFinite(raw) ? raw : 20
+  return Math.min(100, Math.max(1, Math.round(value)))
 }
 
 /** Clamp the minimum review delta size to the schema bounds (chars; 0 = off). */
@@ -189,6 +219,10 @@ export function normalizeSettings(raw: unknown): AdvisorSettings {
     autoRetryDelayMs: coerceAutoRetryDelayMs((value as { autoRetryDelayMs?: unknown }).autoRetryDelayMs),
     autoRetryMax: coerceAutoRetryMax((value as { autoRetryMax?: unknown }).autoRetryMax),
     interveneOnBlocker: (value as { interveneOnBlocker?: unknown }).interveneOnBlocker === true,
+    restorePoints: (value as { restorePoints?: unknown }).restorePoints === true,
+    restorePointKeep: coerceRestorePointKeep((value as { restorePointKeep?: unknown }).restorePointKeep),
+    restorePointOnMutation: (value as { restorePointOnMutation?: unknown }).restorePointOnMutation !== false,
+    completionGate: (value as { completionGate?: unknown }).completionGate !== false,
     minDeltaChars: coerceMinDeltaChars((value as { minDeltaChars?: unknown }).minDeltaChars),
     advisors: deduped
   }
@@ -244,6 +278,10 @@ export function normalizeSettingsLenient(raw: unknown): AdvisorSettings {
     autoRetryDelayMs: coerceAutoRetryDelayMs((value as { autoRetryDelayMs?: unknown }).autoRetryDelayMs),
     autoRetryMax: coerceAutoRetryMax((value as { autoRetryMax?: unknown }).autoRetryMax),
     interveneOnBlocker: (value as { interveneOnBlocker?: unknown }).interveneOnBlocker === true,
+    restorePoints: (value as { restorePoints?: unknown }).restorePoints === true,
+    restorePointKeep: coerceRestorePointKeep((value as { restorePointKeep?: unknown }).restorePointKeep),
+    restorePointOnMutation: (value as { restorePointOnMutation?: unknown }).restorePointOnMutation !== false,
+    completionGate: (value as { completionGate?: unknown }).completionGate !== false,
     minDeltaChars: coerceMinDeltaChars((value as { minDeltaChars?: unknown }).minDeltaChars),
     advisors: preserved
   }

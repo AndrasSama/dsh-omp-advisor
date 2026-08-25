@@ -12,6 +12,7 @@
  *    step boundary by a running driver, or opening a turn when idle.
  */
 import type { AdvisorDeliveryChannel, AdvisorNote, AdvisorSeverity } from './types'
+import { restoreInstructions } from './restore-points'
 
 const ADVISOR_GUIDANCE = 'weigh, don\'t blindly obey'
 
@@ -26,13 +27,37 @@ function escapeXmlAttribute(value: string): string {
 /**
  * Render a batch of advisor notes as the agent-facing message body: one
  * `<advisory>` element per note, severity and advisor as attributes.
+ * Structured meta (rewind recommendation, acceptance + commit hint) is
+ * rendered as nested sections inside the advisory.
  */
 export function formatAdvisorBatchContent(notes: readonly AdvisorNote[]): string {
   return notes
     .map(note => {
       const severity = note.severity ? ` severity="${note.severity}"` : ''
       const who = note.advisor ? ` advisor="${escapeXmlAttribute(note.advisor)}"` : ''
-      return `<advisory${who}${severity} guidance="${ADVISOR_GUIDANCE}">\n${escapeXmlText(note.note)}\n</advisory>`
+      const sections = [escapeXmlText(note.note)]
+      if (note.meta?.rewindTo) {
+        sections.push(
+          `<rewind point="${escapeXmlAttribute(note.meta.rewindTo.id)}">\n${escapeXmlText(
+            restoreInstructions({
+              id: note.meta.rewindTo.id,
+              sha: note.meta.rewindTo.sha,
+              tree: '',
+              time: 0,
+              turn: note.meta.rewindTo.turn
+            })
+          )}\n</rewind>`
+        )
+      }
+      if (note.meta?.acceptance) {
+        const label =
+          note.meta.acceptance === 'completed'
+            ? 'Work verified complete.'
+            : 'User accepted the current state as a compromise.'
+        const hint = note.meta.commitHint ? `\n${note.meta.commitHint}` : ''
+        sections.push(`<accepted state="${escapeXmlAttribute(note.meta.acceptance)}">\n${escapeXmlText(label + hint)}\n</accepted>`)
+      }
+      return `<advisory${who}${severity} guidance="${ADVISOR_GUIDANCE}">\n${sections.join('\n')}\n</advisory>`
     })
     .join('\n')
 }

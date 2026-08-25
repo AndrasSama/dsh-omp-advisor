@@ -9,3 +9,14 @@ export { AdvisorLoop } from '../src/advisor-loop'
 export { SessionAdvisorRuntime } from '../src/runtime'
 export { AdvisorService } from '../src/service'
 export { registerAdvisorRpc, RPC_CHANNEL } from '../src/rpc'
+export {
+  probeGit,
+  clearProbeCache,
+  createRestorePoint,
+  listRestorePoints,
+  diffRestorePoints,
+  pruneRestorePoints,
+  markRestorePointAccepted,
+  restoreInstructions,
+  commitInstructions
+} from '../src/restore-points'
