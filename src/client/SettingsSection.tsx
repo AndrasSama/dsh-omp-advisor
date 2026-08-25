@@ -182,6 +182,254 @@ function WorkspacesInput(props: { value: string[]; onCommit(next: string[]): voi
   )
 }
 
+/* --------------------------- memoized advisor card --------------------------- */
+/*
+ * The roster re-renders on every keystroke (optimistic draft overlay), and
+ * each card carries large <select>s (provider model list, ~240 packaged
+ * skills). Extracting the card into React.memo with stable callbacks means
+ * typing in one card re-renders ONLY that card, and memoized option arrays
+ * keep React from reconciling hundreds of <option> elements per render.
+ */
+
+const PRESET_OPTIONS = ADVISOR_PRESETS.map(preset => (
+  <option key={preset.id} value={preset.id} title={preset.description}>
+    {preset.name} · {preset.role}
+  </option>
+))
+
+interface AdvisorCardProps {
+  entry: AdvisorEntryView
+  index: number
+  catalog: ModelCatalog | null
+  onPatch(index: number, patch: Partial<AdvisorEntryView>): void
+  onRemove(index: number): void
+}
+
+const AdvisorCard = React.memo(function AdvisorCard({
+  entry,
+  index,
+  catalog,
+  onPatch,
+  onRemove
+}: AdvisorCardProps) {
+  const group = catalog?.groups.find(item => item.id === entry.provider)
+  const model = group?.models.find(item => item.id === entry.model)
+  const efforts = model?.efforts ?? []
+  const skills = entry.skills ?? []
+  const preset = entry.preset ? findPreset(entry.preset) : undefined
+
+  const providerOptions = useMemo(
+    () =>
+      (catalog?.groups ?? []).map(item => (
+        <option key={item.id} value={item.id}>
+          {item.name}
+        </option>
+      )),
+    [catalog]
+  )
+  const modelOptions = useMemo(
+    () =>
+      (group?.models ?? []).map(item => (
+        <option key={item.id} value={item.id}>
+          {item.name || item.id}
+        </option>
+      )),
+    [group]
+  )
+  const effortOptions = useMemo(
+    () =>
+      efforts.map(effort => (
+        <option key={effort.id} value={effort.id}>
+          {effort.name || effort.id}
+        </option>
+      )),
+    // `efforts` derives from `model`; depend on the stable catalog object.
+    [model]
+  )
+  const skillOptions = useMemo(
+    () =>
+      SKILL_CATALOG.filter(item => !skills.includes(item.id)).map(item => (
+        <option key={item.id} value={item.id} title={item.description}>
+          {item.id}
+        </option>
+      )),
+    // Only rebuild ~240 options when the skill list itself changes.
+    [entry.skills]
+  )
+
+  return (
+    <div
+      style={{
+        border: '1px dashed var(--dsh-border, rgba(128,128,128,0.3))',
+        borderRadius: 8,
+        padding: 10,
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 8
+      }}
+    >
+      <div style={styles.row}>
+        <input
+          type="checkbox"
+          checked={entry.enabled !== false}
+          onChange={event => onPatch(index, { enabled: event.target.checked })}
+          title="Enable this advisor"
+        />
+        <input
+          style={{ ...styles.input, width: 160 }}
+          value={entry.name}
+          placeholder="advisor name"
+          onChange={event => onPatch(index, { name: event.target.value })}
+        />
+        <select
+          style={styles.select}
+          value={entry.provider}
+          onChange={event => {
+            const nextGroup = catalog?.groups.find(item => item.id === event.target.value)
+            onPatch(index, {
+              provider: event.target.value,
+              model: nextGroup?.models[0]?.id ?? '',
+              reasoningEffort: undefined
+            })
+          }}
+        >
+          <option value="">— provider —</option>
+          {providerOptions}
+        </select>
+        <select
+          style={styles.select}
+          value={entry.model}
+          onChange={event => onPatch(index, { model: event.target.value, reasoningEffort: undefined })}
+        >
+          <option value="">— model —</option>
+          {modelOptions}
+        </select>
+        {efforts.length > 0 && (
+          <select
+            style={styles.select}
+            value={entry.reasoningEffort ?? ''}
+            onChange={event => onPatch(index, { reasoningEffort: event.target.value || undefined })}
+            title="Reasoning effort"
+          >
+            <option value="">default effort</option>
+            {effortOptions}
+          </select>
+        )}
+        <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+          max turns
+          <input
+            type="number"
+            min={1}
+            max={10}
+            style={{ ...styles.input, width: 60 }}
+            value={entry.maxTurns}
+            onChange={event => {
+              const parsed = Number.parseInt(event.target.value, 10)
+              if (Number.isFinite(parsed)) {
+                onPatch(index, { maxTurns: Math.min(10, Math.max(1, parsed)) })
+              }
+            }}
+          />
+        </label>
+        <button style={styles.dangerButton} onClick={() => onRemove(index)}>
+          remove
+        </button>
+      </div>
+      <textarea
+        style={styles.textarea}
+        placeholder="Optional specialization, e.g. 'Focus on security: injection, secrets, unsafe deserialization.'"
+        value={entry.instructions ?? ''}
+        onChange={event => onPatch(index, { instructions: event.target.value })}
+      />
+      <div style={styles.row}>
+        <span style={{ ...styles.hint, minWidth: 150 }}>Workspaces</span>
+        <WorkspacesInput
+          value={entry.workspaces ?? []}
+          onCommit={next => onPatch(index, { workspaces: next })}
+        />
+      </div>
+      <div style={styles.row}>
+        <span style={{ ...styles.hint, minWidth: 150 }} />
+        <span style={styles.hint}>
+          Comma-separated substrings matched against the session's workspace path; this advisor only
+          runs in matching sessions. Leave empty for every session.
+        </span>
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+        <div style={styles.row}>
+          <span style={{ ...styles.hint, minWidth: 150 }}>Skills ({skills.length})</span>
+          <select
+            style={{ ...styles.select, maxWidth: 260 }}
+            value={entry.skillMode === 'lazy' ? 'lazy' : 'inject'}
+            title="inject = embed full skill bodies in the system prompt; lazy = id+description index plus a load_skill tool (saves tokens, costs one extra call per loaded skill)"
+            onChange={event =>
+              onPatch(index, { skillMode: event.target.value === 'lazy' ? 'lazy' : 'inject' })
+            }
+          >
+            <option value="inject">inject full bodies into prompt</option>
+            <option value="lazy">lazy — load_skill on demand</option>
+          </select>
+          {preset && (
+            <>
+              <span style={styles.hint}>preset: {preset.name}</span>
+              <button
+                style={styles.button}
+                title={`Restore the ${skills.length ? 'curated' : ''} skill list of ${preset.name}`}
+                onClick={() => onPatch(index, { skills: [...preset.skills] })}
+              >
+                reset to preset defaults
+              </button>
+            </>
+          )}
+        </div>
+        {skills.length > 0 && (
+          <div style={{ ...styles.row, gap: 6 }}>
+            {skills.map(skillId => {
+              const meta = SKILL_CATALOG.find(item => item.id === skillId)
+              return (
+                <span
+                  key={skillId}
+                  style={styles.chip}
+                  title={meta?.description ?? 'Not packaged with this plugin version'}
+                >
+                  {skillId}
+                  <button
+                    style={{
+                      border: 'none',
+                      background: 'transparent',
+                      color: 'inherit',
+                      cursor: 'pointer',
+                      padding: 0,
+                      font: 'inherit',
+                      lineHeight: 1
+                    }}
+                    title="Remove this skill"
+                    onClick={() => onPatch(index, { skills: skills.filter(id => id !== skillId) })}
+                  >
+                    ×
+                  </button>
+                </span>
+              )
+            })}
+          </div>
+        )}
+        <select
+          style={styles.select}
+          value=""
+          onChange={event => {
+            if (event.target.value) {
+              onPatch(index, { skills: [...skills, event.target.value] })
+            }
+          }}
+        >
+          <option value="">+ add packaged skill…</option>
+          {skillOptions}
+        </select>
+      </div>
+    </div>
+  )
+})
+
 /* --------------------------------- component -------------------------------- */
 
 export function createSettingsSection(ctx: ClientCtx): React.ComponentType<{ close?: () => void }> {
@@ -328,24 +576,32 @@ export function createSettingsSection(ctx: ClientCtx): React.ComponentType<{ clo
     const value = draft ?? view?.settings
     const advisors = useMemo<AdvisorEntryView[]>(() => value?.advisors ?? [], [value])
 
+    // Stable callbacks for the memoized AdvisorCard: read the current roster
+    // through a ref instead of closing over it, so their identity never
+    // changes and sibling cards skip re-rendering while one card is edited.
+    const advisorsRef = useRef(advisors)
+    advisorsRef.current = advisors
+
     const updateAdvisor = useCallback(
       (index: number, patch: Partial<AdvisorEntryView>) => {
-        const next = advisors.map((entry, i) => (i === index ? { ...entry, ...patch } : entry))
+        const next = advisorsRef.current.map((entry, i) =>
+          i === index ? { ...entry, ...patch } : entry
+        )
         const keys = Object.keys(patch)
         const textOnly = keys.every(key => key === 'name' || key === 'instructions')
         write('advisors', next, textOnly ? { text: true } : undefined)
       },
-      [advisors, write]
+      [write]
     )
 
     const removeAdvisor = useCallback(
       (index: number) => {
         write(
           'advisors',
-          advisors.filter((_, i) => i !== index)
+          advisorsRef.current.filter((_, i) => i !== index)
         )
       },
-      [advisors, write]
+      [write]
     )
 
     const addAdvisor = useCallback(() => {
@@ -573,11 +829,7 @@ export function createSettingsSection(ctx: ClientCtx): React.ComponentType<{ clo
               }}
             >
               <option value="">— choose a preset advisor —</option>
-              {ADVISOR_PRESETS.map(preset => (
-                <option key={preset.id} value={preset.id} title={preset.description}>
-                  {preset.name} · {preset.role}
-                </option>
-              ))}
+              {PRESET_OPTIONS}
             </select>
             <span style={styles.hint}>
               Presets create a ready-made advisor with an expanded persona and 10 curated skills.
@@ -588,210 +840,16 @@ export function createSettingsSection(ctx: ClientCtx): React.ComponentType<{ clo
             <div style={styles.hint}>Model list unavailable: {catalogError}</div>
           )}
 
-          {advisors.map((entry, index) => {
-            const group = catalog?.groups.find(item => item.id === entry.provider)
-            const model = group?.models.find(item => item.id === entry.model)
-            const efforts = model?.efforts ?? []
-            return (
-              <div
-                key={index}
-                style={{
-                  border: '1px dashed var(--dsh-border, rgba(128,128,128,0.3))',
-                  borderRadius: 8,
-                  padding: 10,
-                  display: 'flex',
-                  flexDirection: 'column',
-                  gap: 8
-                }}
-              >
-                <div style={styles.row}>
-                  <input
-                    type="checkbox"
-                    checked={entry.enabled !== false}
-                    onChange={event => updateAdvisor(index, { enabled: event.target.checked })}
-                    title="Enable this advisor"
-                  />
-                  <input
-                    style={{ ...styles.input, width: 160 }}
-                    value={entry.name}
-                    placeholder="advisor name"
-                    onChange={event => updateAdvisor(index, { name: event.target.value })}
-                  />
-                  <select
-                    style={styles.select}
-                    value={entry.provider}
-                    onChange={event => {
-                      const nextGroup = catalog?.groups.find(item => item.id === event.target.value)
-                      updateAdvisor(index, {
-                        provider: event.target.value,
-                        model: nextGroup?.models[0]?.id ?? '',
-                        reasoningEffort: undefined
-                      })
-                    }}
-                  >
-                    <option value="">— provider —</option>
-                    {(catalog?.groups ?? []).map(item => (
-                      <option key={item.id} value={item.id}>
-                        {item.name}
-                      </option>
-                    ))}
-                  </select>
-                  <select
-                    style={styles.select}
-                    value={entry.model}
-                    onChange={event => updateAdvisor(index, { model: event.target.value, reasoningEffort: undefined })}
-                  >
-                    <option value="">— model —</option>
-                    {(group?.models ?? []).map(item => (
-                      <option key={item.id} value={item.id}>
-                        {item.name || item.id}
-                      </option>
-                    ))}
-                  </select>
-                  {efforts.length > 0 && (
-                    <select
-                      style={styles.select}
-                      value={entry.reasoningEffort ?? ''}
-                      onChange={event =>
-                        updateAdvisor(index, { reasoningEffort: event.target.value || undefined })
-                      }
-                      title="Reasoning effort"
-                    >
-                      <option value="">default effort</option>
-                      {efforts.map(effort => (
-                        <option key={effort.id} value={effort.id}>
-                          {effort.name || effort.id}
-                        </option>
-                      ))}
-                    </select>
-                  )}
-                  <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-                    max turns
-                    <input
-                      type="number"
-                      min={1}
-                      max={10}
-                      style={{ ...styles.input, width: 60 }}
-                      value={entry.maxTurns}
-                      onChange={event => {
-                        const parsed = Number.parseInt(event.target.value, 10)
-                        if (Number.isFinite(parsed)) {
-                          updateAdvisor(index, { maxTurns: Math.min(10, Math.max(1, parsed)) })
-                        }
-                      }}
-                    />
-                  </label>
-                  <button style={styles.dangerButton} onClick={() => removeAdvisor(index)}>
-                    remove
-                  </button>
-                </div>
-                <textarea
-                  style={styles.textarea}
-                  placeholder="Optional specialization, e.g. 'Focus on security: injection, secrets, unsafe deserialization.'"
-                  value={entry.instructions ?? ''}
-                  onChange={event => updateAdvisor(index, { instructions: event.target.value })}
-                />
-                <div style={styles.row}>
-                  <span style={{ ...styles.hint, minWidth: 150 }}>Workspaces</span>
-                  <WorkspacesInput
-                    value={entry.workspaces ?? []}
-                    onCommit={next => updateAdvisor(index, { workspaces: next })}
-                  />
-                </div>
-                <div style={styles.row}>
-                  <span style={{ ...styles.hint, minWidth: 150 }} />
-                  <span style={styles.hint}>
-                    Comma-separated substrings matched against the session's workspace path; this advisor only
-                    runs in matching sessions. Leave empty for every session.
-                  </span>
-                </div>
-                {(() => {
-                  const skills = entry.skills ?? []
-                  const preset = entry.preset ? findPreset(entry.preset) : undefined
-                  const available = SKILL_CATALOG.filter(item => !skills.includes(item.id))
-                  return (
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                      <div style={styles.row}>
-                        <span style={{ ...styles.hint, minWidth: 150 }}>Skills ({skills.length})</span>
-                        <select
-                          style={{ ...styles.select, maxWidth: 260 }}
-                          value={entry.skillMode === 'lazy' ? 'lazy' : 'inject'}
-                          title="inject = embed full skill bodies in the system prompt; lazy = id+description index plus a load_skill tool (saves tokens, costs one extra call per loaded skill)"
-                          onChange={event =>
-                            updateAdvisor(index, { skillMode: event.target.value === 'lazy' ? 'lazy' : 'inject' })
-                          }
-                        >
-                          <option value="inject">inject full bodies into prompt</option>
-                          <option value="lazy">lazy — load_skill on demand</option>
-                        </select>
-                        {preset && (
-                          <>
-                            <span style={styles.hint}>preset: {preset.name}</span>
-                            <button
-                              style={styles.button}
-                              title={`Restore the ${skills.length ? 'curated' : ''} skill list of ${preset.name}`}
-                              onClick={() => updateAdvisor(index, { skills: [...preset.skills] })}
-                            >
-                              reset to preset defaults
-                            </button>
-                          </>
-                        )}
-                      </div>
-                      {skills.length > 0 && (
-                        <div style={{ ...styles.row, gap: 6 }}>
-                          {skills.map(skillId => {
-                            const meta = SKILL_CATALOG.find(item => item.id === skillId)
-                            return (
-                              <span
-                                key={skillId}
-                                style={styles.chip}
-                                title={meta?.description ?? 'Not packaged with this plugin version'}
-                              >
-                                {skillId}
-                                <button
-                                  style={{
-                                    border: 'none',
-                                    background: 'transparent',
-                                    color: 'inherit',
-                                    cursor: 'pointer',
-                                    padding: 0,
-                                    font: 'inherit',
-                                    lineHeight: 1
-                                  }}
-                                  title="Remove this skill"
-                                  onClick={() =>
-                                    updateAdvisor(index, { skills: skills.filter(id => id !== skillId) })
-                                  }
-                                >
-                                  ×
-                                </button>
-                              </span>
-                            )
-                          })}
-                        </div>
-                      )}
-                      <select
-                        style={styles.select}
-                        value=""
-                        onChange={event => {
-                          if (event.target.value) {
-                            updateAdvisor(index, { skills: [...skills, event.target.value] })
-                          }
-                        }}
-                      >
-                        <option value="">+ add packaged skill…</option>
-                        {available.map(item => (
-                          <option key={item.id} value={item.id} title={item.description}>
-                            {item.id}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                  )
-                })()}
-              </div>
-            )
-          })}
+          {advisors.map((entry, index) => (
+            <AdvisorCard
+              key={index}
+              entry={entry}
+              index={index}
+              catalog={catalog}
+              onPatch={updateAdvisor}
+              onRemove={removeAdvisor}
+            />
+          ))}
 
           <div>
             <button style={styles.button} onClick={addAdvisor}>

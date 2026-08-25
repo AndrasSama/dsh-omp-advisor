@@ -5,6 +5,7 @@ import {
   AdviseGate,
   AdvisorLoop,
   AdvisorOutputQuarantinedError,
+  AdvisorService,
   SessionAdvisorRuntime,
   advisorMatchesWorkspace,
   formatAdvisorBatchContent,
@@ -583,7 +584,7 @@ test('client bundle exports service-name injects, not package names', async () =
 
   assert.equal(registrations.length, 1)
   assert.equal(registrations[0].id, 'dsh-omp-advisor')
-  const reactStub = { createElement: () => null }
+  const reactStub = { createElement: () => null, memo: component => component }
   const exports = registrations[0].factory((spec) => {
     if (spec === 'react' || spec === 'react/jsx-runtime') return reactStub
     throw new Error(`unexpected external require in client bundle: ${spec}`)
@@ -1087,4 +1088,162 @@ test('inject skill mode keeps full bodies and withholds load_skill', async () =>
   await loop.review('## Update 1\n\n### User\nhello', { inProgress: false, signal: new AbortController().signal })
   assert.match(llm.calls[0].system, /## Watch for/)
   assert.ok(!llm.calls[0].tools.map(t => t.name).includes('load_skill'))
+})
+
+/* ------------------- service: end-to-end session intervention ------------------- */
+/*
+ * These wire the real AdvisorService against a scripted host context (event
+ * emitter + settings scope + agent registry + scripted llm) to prove the full
+ * path: session/created attaches a runtime, turn/end enqueues a review, the
+ * advisor model's advise call is gated and delivered into the primary agent,
+ * and a failed primary turn receives the auto-continue followup.
+ */
+
+function mockHostCtx({ raw, llm, agents }) {
+  const handlers = {}
+  let current = raw
+  return {
+    emit(event, ...args) {
+      for (const handler of handlers[event] ?? []) handler(...args)
+    },
+    on(event, handler) {
+      ;(handlers[event] ??= []).push(handler)
+    },
+    settings: {
+      register(_namespace, _schema, options) {
+        return {
+          // DSH scopes store the value; `validate` is a pure validator that
+          // throws on bad input and returns nothing — get() yields the raw value.
+          get: () => current,
+          watch() {
+            return () => {}
+          },
+          update(patch) {
+            current = { ...current, ...patch }
+            options?.validate?.(current)
+          }
+        }
+      }
+    },
+    agents: { get: id => agents.get(id) },
+    llm,
+    connection: null, // skip RPC registration in tests
+    logger: { debug() {} }
+  }
+}
+
+function serviceAgent(events) {
+  const injected = []
+  const steered = []
+  const followups = []
+  return {
+    injected,
+    steered,
+    followups,
+    id: 'agent-1',
+    status: 'running',
+    session: { id: 's1', events },
+    inject(message) {
+      injected.push(message)
+    },
+    steer(message) {
+      steered.push(message)
+    },
+    followup(message) {
+      followups.push(message)
+    }
+  }
+}
+
+const serviceBaseRaw = {
+  enabled: true,
+  reviewTrigger: 'turn',
+  interruptSeverities: ['concern', 'blocker'],
+  adviceCoalesceMs: 0,
+  autoRetry: false,
+  advisors: [{ name: 'sentinel', provider: 'p', model: 'm', maxTurns: 2, enabled: true }]
+}
+
+test('service end-to-end: turn/end review reaches the primary agent as a steered advisory', async () => {
+  const events = [{ type: 'user/message', data: { content: [{ type: 'text', text: 'refactor the parser' }] } }]
+  const agent = serviceAgent(events)
+  const llm = scriptedLlm([
+    [
+      {
+        type: 'tool-call',
+        id: 'c1',
+        name: 'advise',
+        arguments: JSON.stringify({ note: 'watch the seam between lexer and parser', severity: 'concern' })
+      }
+    ]
+  ])
+  const ctx = mockHostCtx({ raw: serviceBaseRaw, llm, agents: new Map([['s1', agent]]) })
+  const service = new AdvisorService(ctx, {})
+  const session = { id: 's1', header: { cwd: '/tmp/ws' }, events }
+
+  ctx.emit('session/created', session)
+  ctx.emit('session/event', session, { type: 'turn/end', data: { reason: { kind: 'completed' } } })
+  await new Promise(resolve => setTimeout(resolve, 80))
+
+  // Concern severity + primary running => steered, wrapped as an advisory.
+  assert.equal(agent.steered.length, 1)
+  assert.match(agent.steered[0].text, /<advisory/)
+  assert.match(agent.steered[0].text, /watch the seam between lexer and parser/)
+
+  // The real model request carried the advise tool, the read-only tools, and
+  // the task preprompt (system.md + advise tool reference).
+  const request = llm.calls[0]
+  const toolNames = request.tools.map(tool => tool.name)
+  assert.ok(toolNames.includes('advise'))
+  assert.ok(toolNames.includes('read'))
+  assert.ok(toolNames.includes('grep'))
+  assert.ok(toolNames.includes('glob'))
+  assert.match(request.system, /peer-shadow main agent/)
+  assert.match(request.system, /advise/)
+
+  // Snapshot reflects the delivered advice.
+  const snap = service.snapshot('s1')
+  assert.equal(snap.active, true)
+  assert.equal(snap.advisors[0].reviewsCompleted, 1)
+  assert.equal(snap.advisors[0].adviceDelivered, 1)
+})
+
+test('service end-to-end: workspace-scoped advisor stays out of non-matching sessions', async () => {
+  const events = [{ type: 'user/message', data: { content: [{ type: 'text', text: 'hello' }] } }]
+  const agent = serviceAgent(events)
+  const llm = scriptedLlm([[{ type: 'text', text: 'ok' }]])
+  const raw = {
+    ...serviceBaseRaw,
+    advisors: [{ ...serviceBaseRaw.advisors[0], workspaces: ['somewhere-else'] }]
+  }
+  const ctx = mockHostCtx({ raw, llm, agents: new Map([['s1', agent]]) })
+  const service = new AdvisorService(ctx, {})
+  const session = { id: 's1', header: { cwd: '/tmp/ws' }, events }
+  ctx.emit('session/created', session)
+  ctx.emit('session/event', session, { type: 'turn/end', data: { reason: { kind: 'completed' } } })
+  await new Promise(resolve => setTimeout(resolve, 60))
+  assert.equal(llm.calls.length, 0)
+  assert.equal(service.snapshot('s1').active, false)
+})
+
+test('service end-to-end: failed primary turn receives the auto-continue followup', async () => {
+  const events = []
+  const agent = serviceAgent(events)
+  const llm = scriptedLlm([])
+  const raw = { ...serviceBaseRaw, autoRetry: true, autoRetryDelayMs: 1000, autoRetryMax: 3 }
+  const ctx = mockHostCtx({ raw, llm, agents: new Map([['s1', agent]]) })
+  const service = new AdvisorService(ctx, {})
+  const session = { id: 's1', header: { cwd: '/tmp/ws' }, events }
+  ctx.emit('session/created', session)
+  // Shorten the retry delay before the failing turn fires (settings clamp >= 1000ms).
+  const runtime = [...service['runtimes'].values()][0]
+  runtime.autoRetryDelayMs = 20
+  ctx.emit('session/event', session, {
+    type: 'turn/end',
+    data: { reason: { kind: 'error', error: { message: '503 server_selection_failed', code: 'SERVER_ERROR' } } }
+  })
+  await new Promise(resolve => setTimeout(resolve, 80))
+  assert.equal(agent.followups.length, 1)
+  assert.match(agent.followups[0].text, /continue from where you left off/i)
+  assert.match(agent.followups[0].text, /server_selection_failed/)
 })

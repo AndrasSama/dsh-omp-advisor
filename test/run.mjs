@@ -21,7 +21,11 @@ await build({
   platform: 'node',
   target: 'node22',
   loader: { '.md': 'text' },
-  alias: { '@deepseek-ai/schemastery': join(root, 'test/stubs/schemastery.ts') },
+  alias: {
+    '@deepseek-ai/schemastery': join(root, 'test/stubs/schemastery.ts'),
+    '@deepseek-ai/cordis': join(root, 'test/stubs/cordis.ts'),
+    '@deepseek-ai/dsh-llm': join(root, 'test/stubs/dsh-llm.ts')
+  },
   logLevel: 'warning'
 })
 
