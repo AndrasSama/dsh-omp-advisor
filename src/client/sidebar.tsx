@@ -23,7 +23,10 @@
  *
  * Data: the same `/dsh-omp-advisor` snapshot RPC the settings section uses,
  * polled at 2s while registered (shared module-level store feeds both the
- * tab component and the synchronous tab-strip badge).
+ * tab component and the synchronous tab-strip badge). Everything honors the
+ * sidebar's session scope: badge, lead card, and activity feed reflect only
+ * the scoped session's workspace; other sessions collapse into "Other
+ * sessions".
  */
 import * as React from 'react'
 import { unwrapRpcResult } from './model-catalog'
@@ -343,9 +346,34 @@ function AdvisorsMonitorTab(props: { scopedSessionId?: string }): React.ReactEle
     )
   }
 
+  // Workspace rules: when the tab is scoped to a conversation, that session's
+  // card leads and everything else collapses into "Other sessions"; the
+  // activity feed narrows to the scoped session too. Without a scope (should
+  // not happen inside better-sidebar, defensive) fall back to the full list.
+  const scopedSession = scoped ? sessions.find(session => session.sessionId === scoped) : undefined
+  const others = scoped ? sessions.filter(session => session.sessionId !== scoped) : []
+  const visibleEvents = scoped
+    ? events.filter(event => !event.sessionId || event.sessionId === scoped)
+    : events
+
+  const detailsStyle: React.CSSProperties = {
+    border: '1px solid var(--dsh-border, rgba(128,128,128,0.2))',
+    borderRadius: 10,
+    padding: '6px 10px'
+  }
+
   return (
     <div style={panel}>
-      {sessions.length === 0 ? (
+      {scoped && !scopedSession && (
+        <div style={cardStyle}>
+          <strong>No advisors in this workspace</strong>
+          <span style={hint}>
+            No advisor data for this session yet — the master switch is off (Settings → Ward Council →
+            General), or no configured advisor's workspace patterns match this session's workspace.
+          </span>
+        </div>
+      )}
+      {!scoped && sessions.length === 0 && (
         <div style={cardStyle}>
           <strong>No advisor sessions</strong>
           <span style={hint}>
@@ -353,17 +381,29 @@ function AdvisorsMonitorTab(props: { scopedSessionId?: string }): React.ReactEle
             session matches an advisor's workspace patterns.
           </span>
         </div>
-      ) : (
-        sessions.map(renderSessionCard)
+      )}
+      {scopedSession && renderSessionCard(scopedSession)}
+      {!scoped && sessions.map(renderSessionCard)}
+      {others.length > 0 && (
+        <details style={detailsStyle}>
+          <summary style={{ cursor: 'pointer', opacity: 0.7, fontSize: 12 }}>
+            Other sessions ({others.length})
+          </summary>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 12, marginTop: 8 }}>
+            {others.map(renderSessionCard)}
+          </div>
+        </details>
       )}
 
       <div style={cardStyle}>
-        <strong>Activity</strong>
-        {events.length === 0 ? (
-          <span style={hint}>No advisor activity yet this server run.</span>
+        <strong>{scoped ? 'Activity — this session' : 'Activity'}</strong>
+        {visibleEvents.length === 0 ? (
+          <span style={hint}>
+            {scoped ? 'No activity for this session yet.' : 'No advisor activity yet this server run.'}
+          </span>
         ) : (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-            {events.slice(0, 60).map((event, index) => (
+            {visibleEvents.slice(0, 60).map((event, index) => (
               <div key={`${event.time}-${index}`} style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                 <span style={{ ...hint, fontVariantNumeric: 'tabular-nums' }}>{formatTime(event.time)}</span>
                 <span
@@ -407,15 +447,29 @@ function AdvisorIcon({ size }: { size: number }): React.ReactElement {
   )
 }
 
-/** Synchronous, cheap (runs on every sidebar render): reads the poll cache. */
-function badge(): string | number | null {
+function hasTrouble(advisors: SidebarAdvisorStatus[]): boolean {
+  return advisors.some(advisor => advisor.status === 'halted' || advisor.status === 'error' || advisor.lastError)
+}
+
+/**
+ * Synchronous, cheap (runs on every sidebar render): reads the poll cache.
+ * Follows workspace rules — better-sidebar passes the tab's session scope, so
+ * the badge counts only THIS session's advisors (null when none are attached
+ * here); other workspaces' advisors never light it up. Without a scope the
+ * badge falls back to the global count.
+ */
+function badge(...args: unknown[]): string | number | null {
+  const scope = args[1] as { sessionId?: string } | undefined
   const sessions = cache?.sessions ?? []
+  if (scope?.sessionId) {
+    const target = sessions.find(session => session.sessionId === scope.sessionId)
+    if (!target || target.advisors.length === 0) return null
+    if (hasTrouble(target.advisors)) return '!'
+    return target.advisors.length
+  }
   const advisors = sessions.flatMap(session => session.advisors)
   if (advisors.length === 0) return null
-  const troubled = advisors.filter(
-    advisor => advisor.status === 'halted' || advisor.status === 'error' || advisor.lastError
-  )
-  if (troubled.length > 0) return '!'
+  if (hasTrouble(advisors)) return '!'
   return advisors.length
 }
 
