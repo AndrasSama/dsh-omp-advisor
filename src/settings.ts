@@ -152,14 +152,20 @@ function coerceMinDeltaChars(raw: unknown): number {
 
 /**
  * Workspace scoping match: an advisor with no usable patterns runs everywhere;
- * otherwise one of its patterns must appear inside the session cwd.
+ * otherwise one of its patterns must match the session cwd. A plain pattern is
+ * a SUBSTRING match (so 'Qwest Chain' matches any path containing it); a
+ * pattern prefixed with '=' matches the cwd EXACTLY — use it for broad paths
+ * like '/home/sama' that would otherwise swallow every subdirectory.
  */
 export function advisorMatchesWorkspace(entry: Pick<AdvisorEntry, 'workspaces'>, cwd: string): boolean {
   const patterns = (entry.workspaces ?? [])
     .map(pattern => pattern.trim())
     .filter(pattern => pattern !== '')
   if (patterns.length === 0) return true
-  return patterns.some(pattern => cwd.includes(pattern))
+  return patterns.some(pattern => {
+    if (pattern.startsWith('=')) return cwd === pattern.slice(1).trim()
+    return cwd.includes(pattern)
+  })
 }
 
 /** Normalize a resolved settings value (defensive; the schema already validates). */

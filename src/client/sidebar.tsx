@@ -235,12 +235,14 @@ function formatTime(time: number): string {
 
 /* ------------------------------- tab component ------------------------------- */
 
-/** Client mirror of the host's advisorMatchesWorkspace (substring patterns). */
+/** Client mirror of the host's advisorMatchesWorkspace (substring patterns, '=' = exact). */
 function matchesWorkspace(patterns: string[] | undefined, cwd: string | undefined): boolean {
   const list = (patterns ?? []).map(pattern => pattern.trim()).filter(pattern => pattern !== '')
   if (list.length === 0) return true
   if (!cwd) return false
-  return list.some(pattern => cwd.includes(pattern))
+  return list.some(pattern =>
+    pattern.startsWith('=') ? cwd === pattern.slice(1).trim() : cwd.includes(pattern)
+  )
 }
 
 function basename(path: string | undefined): string | undefined {

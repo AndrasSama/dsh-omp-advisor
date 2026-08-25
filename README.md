@@ -148,7 +148,7 @@ Open **Settings → Ward Council**. The section has four inner tabs — **Genera
   - **model picked from the DSH model list** (provider route → model → optional reasoning effort),
   - **max turns** — the advisor's tool-loop budget per review (1–10, default 4),
   - optional specialization instructions (e.g. *"Focus on security: injection, secrets, unsafe deserialization."*),
-  - **workspaces** — comma-separated substrings matched against the session's workspace path; the advisor only runs in matching sessions (empty = every session). This is how you give the writing bench to your novel workspace and the engineering bench to your code workspace.
+  - **workspaces** — comma-separated patterns matched against the session's workspace path; the advisor only runs in matching sessions (empty = every session). Plain patterns are SUBSTRING matches — `/home/sama` also matches `/home/sama/anything` — so for broad paths prefix with `=` for an exact cwd match (`=/home/sama`). This is how you give the writing bench to your novel workspace and the engineering bench to your code workspace.
   - **skills** — the advisor's curated skill chips: remove one (`×`), add any packaged skill from the catalog dropdown, or **reset to preset defaults** if the advisor was created from a preset (see [Skills](#skills)),
   - **skill delivery** — `inject` (default: full skill bodies in the system prompt) or `lazy` (id+description index plus a `load_skill` tool — saves tokens, costs one extra call per loaded skill),
   - per-advisor enable toggle.
@@ -224,7 +224,7 @@ The plugin packages **250 advisor skills** under [`skills/<id>/SKILL.md`](./skil
 ```bash
 npm install        # dev deps only; DSH packages are runtime-provided
 npm run build      # gen-skills + host ESM (lib/index.js) + client CJS ModuleLoader bundle (lib/client.js)
-npm test           # 103 unit tests over the ported semantics
+npm test           # 105 unit tests over the ported semantics
 npm run typecheck  # tsc --noEmit (DSH packages shimmed)
 ```
 

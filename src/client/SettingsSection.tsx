@@ -461,9 +461,10 @@ const AdvisorCard = React.memo(function AdvisorCard({
           <div style={styles.row}>
             <span style={{ ...styles.hint, minWidth: 150 }} />
             <span style={styles.hint}>
-              Comma-separated substrings matched against the session's workspace path; this advisor only
-              runs in matching sessions. Leave empty for every session. The Workspaces tab offers a
-              per-workspace toggle matrix over the same field.
+              Comma-separated patterns matched against the session's workspace path; this advisor only runs
+              in matching sessions (empty = every session). A pattern is a SUBSTRING match — '/home/sama'
+              also matches '/home/sama/anything'. Prefix a pattern with '=' for an EXACT path match, e.g.
+              '=/home/sama'. The Workspaces tab offers a per-workspace toggle matrix over the same field.
             </span>
           </div>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
@@ -596,7 +597,8 @@ function WorkspacesMatrix({ advisors, knownWorkspaces, onPatchAdvisor }: Workspa
         <span style={styles.hint}>
           Which advisor runs in which workspace. A checked cell means the workspace pattern is in that
           advisor's list; an advisor with no patterns runs everywhere (indeterminate cells — checking one
-          scopes it to that single workspace).
+          scopes it to that single workspace). Patterns are SUBSTRING matches: '/home/sama' also matches
+          '/home/sama/anything', so prefer deeper paths or prefix with '=' for an exact cwd ('=/home/sama').
         </span>
       </div>
       {advisors.length === 0 ? (
@@ -672,7 +674,7 @@ function WorkspacesMatrix({ advisors, knownWorkspaces, onPatchAdvisor }: Workspa
       <div style={styles.row}>
         <input
           style={{ ...styles.input, flex: 1, minWidth: 220 }}
-          placeholder="Add a workspace pattern (path or substring)…"
+          placeholder="Add a workspace pattern (path or substring, '=' = exact)…"
           value={draft}
           onChange={event => setDraft(event.target.value)}
           onKeyDown={event => {

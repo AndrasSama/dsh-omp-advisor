@@ -2070,3 +2070,23 @@ test('service snapshot: pre-existing title in the session log folds in on attach
   assert.equal(snap.title, 'Earlier title', 'title folded from existing events')
   assert.equal(snap.cwd, '/tmp/other')
 })
+
+/* ------------------- v0.6.5: exact-match workspace patterns ('=') ------------------- */
+
+test('advisorMatchesWorkspace: "=" prefix means exact cwd match', () => {
+  const home = { workspaces: ['=/home/sama'] }
+  assert.equal(advisorMatchesWorkspace(home, '/home/sama'), true)
+  // Substring semantics would swallow every subdirectory — exact must not.
+  assert.equal(advisorMatchesWorkspace(home, '/home/sama/the-silent-gate'), false)
+  assert.equal(advisorMatchesWorkspace(home, '/home/sama/.hermes/profiles/writer'), false)
+})
+
+test('advisorMatchesWorkspace: mixed lists keep substring default, "=" opt-in, whitespace tolerated', () => {
+  const mixed = { workspaces: ['/home/sama/Qwest Chain', '= /home/sama'] }
+  assert.equal(advisorMatchesWorkspace(mixed, '/home/sama'), true)
+  assert.equal(advisorMatchesWorkspace(mixed, '/home/sama/Qwest Chain'), true)
+  assert.equal(advisorMatchesWorkspace(mixed, '/home/sama/.hermes/x'), false, 'neither pattern hits')
+  // Plain patterns stay substring (documented behavior preserved).
+  const plain = { workspaces: ['Qwest Chain'] }
+  assert.equal(advisorMatchesWorkspace(plain, '/mnt/work/Qwest Chain/sub/dir'), true)
+})
