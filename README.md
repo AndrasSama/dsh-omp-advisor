@@ -4,11 +4,23 @@
 
 # Ward Council
 
-*Package name: `dsh-omp-advisor` — the name under which it installs and stores settings.*
+> **Advisors guide. The ward protects. The model executes.**
+>
+> *Package name: `dsh-omp-advisor` — the name under which it installs and stores settings.*
 
-**oh-my-pi's advisor subsystem, ported to [DeepSeek Harness](https://github.com/deepseek-ai/dsh) (DSH). Advisors guide. The ward protects. The model executes.**
+## What is this?
 
-Attach one or more independent *advisor* models to your live DSH sessions. Each advisor watches the primary agent's transcript as it grows, may investigate the workspace with read-only tools (`read` / `grep` / `glob`), and delivers concrete advice through a dedicated `advise` tool — exactly the advisor-watchdog design from [can1357/oh-my-pi](https://github.com/can1357/oh-my-pi), re-built natively on DSH's plugin seams.
+Your coding agent is good, but on a long session it can tunnel-vision: miss a security hole, claim *"done"* before the tests actually pass, or plow ahead after a wrong turn. **Ward Council** gives it a second set of eyes — one or more independent *advisor* models that watch the session in real time and speak up when something matters.
+
+Each advisor reads the transcript as it grows, may investigate your workspace with read-only tools (`read` / `grep` / `glob`), and hands over concrete advice through a dedicated `advise` tool. Advice arrives as a clearly-labeled note the primary agent *weighs* — never a command it must obey:
+
+```
+<advisory advisor="The Red Teamer" severity="concern" guidance="weigh, don't blindly obey">
+  The SQL in search.py interpolates the user query directly — parameterize it before this ships.
+</advisory>
+```
+
+You pick each advisor's model from DSH's model list, scope it to specific workspaces, and give it a persona (25 presets included) plus curated domain skills (250 packaged). It is the advisor-watchdog design from [can1357/oh-my-pi](https://github.com/can1357/oh-my-pi), rebuilt natively on [DeepSeek Harness](https://github.com/deepseek-ai/dsh) (DSH) plugin seams.
 
 ```
 primary agent ──► session log ──► delta renderer ──► advisor model (your pick from the DSH model list)
@@ -17,35 +29,77 @@ primary agent ──► session log ──► delta renderer ──► advisor m
       └──── agent.inject / agent.steer ◄── advise tool ── dedupe + quarantine
 ```
 
+## At a glance
+
+- **Real-time review** — advisors review each new slice of the transcript (per turn, or per step) and never re-read history twice.
+- **Advice, not orders** — notes carry a severity (`nit` / `concern` / `blocker`) and the guidance *"weigh, don't blindly obey"*; the primary agent decides what to do.
+- **Persistent memory** — advisors recall relevant lessons into each review and write durable lessons back, through pluggable engines (plaintext MD, OpenViking, Hindsight, MisakaNet, mem0, or any MCP server).
+- **Git restore points** — side-effect-free workspace snapshots at turn boundaries let an advisor recommend a precise, worktree-only rewind.
+- **Completion gate** — before the agent claims *"done"*, an advisor verifies the original ask is actually implemented and demands an honest report otherwise.
+- **Resilience** — auto-retry for failed reviews and turns, quota cooldowns, output quarantine; an advisor never blocks your agent.
+- **25 personas, 250 skills** — one-click presets from security auditor to web-novel architect, each with curated domain skills.
+- **Multi-tab settings + live monitor** — General / Advisors / Workspaces / Memory / Monitor, plus an optional workspace-scoped sidebar tab.
+
+## Contents
+
+- [How it works](#how-it-works) — review loop · advice & delivery · resilience · intervention · restore points · completion gate · memory · UI
+- [Install](#install) · [Configure](#configure) · [Presets](#presets) · [Skills](#skills)
+- [Safety model](#safety-model) · [Development](#development) · [Attribution & license](#attribution--license) · [Known limitations](#known-limitations)
+
 ## How it works
 
+### The review loop
+
 - **Incremental reviews.** Advisors never see the whole history twice: a cursor over the durable session log renders each new slice (`user/message`, `assistant/message`, `tool/call`, `tool/result`) into a compact markdown *update* the advisor model reviews.
+- **Tiny-delta skip (optional).** With **Skip tiny deltas** set, transcript updates smaller than the threshold are skipped without calling the advisor model — a cheap way to cut advisor traffic on chatty sessions (skipped deltas are not replayed later).
+
+### Advice & delivery
+
 - **Advice, not orders.** Notes arrive as
   `<advisory advisor="…" severity="…" guidance="weigh, don't blindly obey">…</advisory>`
   messages. The primary agent decides what to do with them.
 - **Severities.** `nit` (default) · `concern` · `blocker`. Escalation-rank dedupe: the same note only re-delivers at a strictly higher severity.
 - **Delivery channels (DSH-native).**
+
   | Severity | Primary running | Primary idle |
   |---|---|---|
   | non-interrupting (default: `nit`) | `agent.inject` — rides the next step boundary, never wakes | `agent.inject` |
   | interrupting (default: `concern`, `blocker`) | `agent.steer` — nearest step boundary | `concern` downgrades to `inject`; `blocker` still steers (may wake a turn) |
+
 - **Mid-turn deferral.** With `reviewTrigger: step`, non-blocker notes raised while the turn is still running are withheld and flushed deterministically when the turn completes, so partial work is not interrupted and no advice is lost.
 - **Coalescing (optional).** With several advisors attached, notes can land in rapid succession. Set **Coalesce advice** to a window in ms (e.g. `1500`) and the runtime buffers notes from *all* advisors for that window, then emits them as **one multi-`<advisory>` message per delivery channel** instead of one message per note. Semantics:
   - `0` (default) — every note is delivered individually, exactly as above.
   - Window active — the timer starts on the first buffered note; when it fires, the batch is grouped by channel at emit time (steer vs inject is re-resolved against the primary's *current* state) and sent as one message per non-empty channel.
   - Interrupting severity — a `concern`/`blocker` (per your interrupting set) **flushes the whole batch immediately**, so urgent advice never waits out the window.
   - Session dispose cancels the timer and drops buffered notes: a disposed session never receives advice.
+
+### Resilience
+
 - **Auto-retry (optional, on by default).** Failures recover automatically instead of dying silently:
   - A failed advisor review (rate limit, transient provider error) re-runs the *same* delta after the configured delay, up to the configured attempt cap.
   - A failed **primary-model turn** (`turn/end` with `reason.kind: "error"`) receives an automatic *"continue from where you left off"* followup message after the same delay, bounded per failure episode and reset by any completed turn.
   - Attempt cap: `1–999`, or **`0` = unlimited** (the message labels the cap `∞`). User aborts and permanent errors (unknown model/provider) never retry — even with an unlimited cap. Toggle the whole feature off with **Auto-retry failures**.
-- **Blocker intervention (optional, off by default).** DSH exposes no synchronous pre-tool-call veto to plugins, so this is the strongest interruption the platform allows: when an advisor raises a `blocker` while the primary agent is **running**, the plugin calls `agent.cancel` on the running step — tool calls not yet dispatched abort, already-running calls commit — then wakes the agent with the advisory as a followup so it sees the reason and can react. With review trigger `step`, this lands between steps, i.e. before the model can issue the *next* destructive call; a fast tool inside the current step may finish first. Opt in with **Blocker intervention**; without it, advice stays advice.
-- **Git restore points (optional, off by default).** The plugin snapshots the workspace into **side-effect-free git objects** — a throwaway index captures tracked changes *and* untracked files (honoring `.gitignore`), stored as commit objects under the hidden namespace `refs/dsh-omp-advisor/**`. Your index, HEAD, branch, and worktree are never touched, and no reset/clean/stash command is ever run. Snapshots happen at turn boundaries and (optionally) **before mutating tools** via pass-through `fs/write-intent` / `fs/edit-intent` / `tools/pre-execute` listeners with a bounded wait that never blocks your tools. Advisors gain read-only `list_restore_points` / `diff_restore_points` tools; after a destructive or wrong step an advisor can call `advise` with `rewindTo` — the advisory then carries the exact worktree-only restore recipe (`git restore --source=<sha> --worktree --staged .`) plus the advisor's classification of **which steps must not happen again and which were progress**. The primary model executes the restore itself; the plugin never rewinds anything. Files created after a point are kept, never deleted. Non-git workspaces are skipped.
-- **Completion gate (on by default, prompt-only).** When the watched agent moves to finish ("done", "all tests pass", goal completion), the advisor verifies the original ask is actually implemented — against the workspace and, when restore points exist, the session's baseline→now diff. If not, it instructs the agent to **report honestly what was done and what wasn't, and ask you whether the partial state is acceptable**. Once the work is verified complete — or you explicitly accept the compromise — the advisor's `acceptance` advisory reminds the agent to **commit the accepted state to the branch it is working on** (the plugin marks the latest restore point accepted; the agent runs the commit).
-- **Tiny-delta skip (optional).** With **Skip tiny deltas** set, transcript updates smaller than the threshold are skipped without calling the advisor model — a cheap way to cut advisor traffic on chatty sessions (skipped deltas are not replayed later).
 - **Containment (ported).** Output quarantine (unavailable-tool requests, output-only destructive directives), 3-consecutive-failure backlog drop, permanent-error halt until settings change, quota/rate-limit cooldown pause. The advisor **never blocks the primary agent** — a deliberate, safer deviation from oh-my-pi's catch-up wait.
+
+### Intervention
+
+- **Blocker intervention (optional, off by default).** DSH exposes no synchronous pre-tool-call veto to plugins, so this is the strongest interruption the platform allows: when an advisor raises a `blocker` while the primary agent is **running**, the plugin calls `agent.cancel` on the running step — tool calls not yet dispatched abort, already-running calls commit — then wakes the agent with the advisory as a followup so it sees the reason and can react. With review trigger `step`, this lands between steps, i.e. before the model can issue the *next* destructive call; a fast tool inside the current step may finish first. Opt in with **Blocker intervention**; without it, advice stays advice.
+
+### Git restore points
+
+- **Git restore points (optional, off by default).** The plugin snapshots the workspace into **side-effect-free git objects** — a throwaway index captures tracked changes *and* untracked files (honoring `.gitignore`), stored as commit objects under the hidden namespace `refs/dsh-omp-advisor/**`. Your index, HEAD, branch, and worktree are never touched, and no reset/clean/stash command is ever run. Snapshots happen at turn boundaries and (optionally) **before mutating tools** via pass-through `fs/write-intent` / `fs/edit-intent` / `tools/pre-execute` listeners with a bounded wait that never blocks your tools. Advisors gain read-only `list_restore_points` / `diff_restore_points` tools; after a destructive or wrong step an advisor can call `advise` with `rewindTo` — the advisory then carries the exact worktree-only restore recipe (`git restore --source=<sha> --worktree --staged .`) plus the advisor's classification of **which steps must not happen again and which were progress**. The primary model executes the restore itself; the plugin never rewinds anything. Files created after a point are kept, never deleted. Non-git workspaces are skipped.
+
+### Completion gate
+
+- **Completion gate (on by default, prompt-only).** When the watched agent moves to finish ("done", "all tests pass", goal completion), the advisor verifies the original ask is actually implemented — against the workspace and, when restore points exist, the session's baseline→now diff. If not, it instructs the agent to **report honestly what was done and what wasn't, and ask you whether the partial state is acceptable**. Once the work is verified complete — or you explicitly accept the compromise — the advisor's `acceptance` advisory reminds the agent to **commit the accepted state to the branch it is working on** (the plugin marks the latest restore point accepted; the agent runs the commit).
+
+### Advisor memory
+
+- **Advisor memory (v0.7.0).** Advisors recall relevant long-term lessons into each review and write durable lessons back, through a pluggable engine roster: a built-in per-workspace plaintext store (default), OpenViking, Hindsight, MisakaNet, mem0, and any custom MCP memory server. Multiple engines run at once, each advisor picks its own, unavailable engines are grayed out and never block a review, and a write gate (approval / auto / read-only) controls what gets stored. Full controls live in the [Memory tab](#configure).
+
+### Settings UI & monitoring
+
 - **Multi-tab settings UI.** The settings section is organized like the Plugin Market's inner tab bar: **General** (policy switches), **Advisors** (the roster — cards collapsed by default, click a header to expand), **Workspaces** (a workspace × advisor activation matrix over the same `workspaces` field), **Memory** (persistent advisor memory — pluggable engines, write gate, per-advisor engine toggles), and **Monitor** (live status + activity feed).
-- **Advisor memory (v0.7.0).** Advisors recall relevant long-term lessons into each review and write durable lessons back, through a pluggable engine roster: a built-in per-workspace plaintext store (default), OpenViking, Hindsight, MisakaNet, mem0, and any custom MCP memory server. Multiple engines run at once, each advisor picks its own, unavailable engines are grayed out and never block a review, and a write gate (approval / auto / read-only) controls what gets stored.
 - **Optional sidebar monitor tab.** When [dsh-better-sidebar](https://github.com/omdsh-dev/DSH-better-sidebar) is installed, the plugin registers an **Advisors** tab in the sidebar workbench: a **workspace-scoped** monitor: the tab follows the sidebar's session scope, so it shows this session's name and workspace, its attached advisors (status dot, review/advice counters, last error) and its activity feed — other sessions stay collapsed under "Other sessions", and the tab-strip badge counts only this session's advisors (`!` when one is halted/errored, hidden when none are attached here). Detection is a bounded runtime probe — **never a hard dependency**: without the sidebar the plugin loads and behaves exactly as before.
 
 ## Install
@@ -128,9 +182,9 @@ in the dsh-omp-advisor settings namespace and is edited through the GUI section.
 
 ## Configure
 
-Open **Settings → Ward Council**. The section has five inner tabs — **General**, **Advisors**, **Workspaces**, **Memory**, **Monitor** — patterned after the Plugin Market's sub-tab bar.
+Open **Settings → Ward Council**. The section has five inner tabs — **General**, **Advisors**, **Workspaces**, **Memory**, **Monitor** — patterned after the Plugin Market's sub-tab bar. Settings live in the `dsh-omp-advisor` namespace and apply **live** — no restart needed when you edit the roster. Advisor model calls go through `ctx.llm.stream` with the provider route + model id you picked, so billing, routing, and failover behave exactly like your other DSH model traffic.
 
-**General tab:**
+### General tab
 
 - **Attach advisors to sessions** — master switch (off by default).
 - **Review trigger** — `turn` (review completed turns) or `step` (review while the turn runs). Step mode fires on every tool step — the UI warns it is heavy on rate-limited or metered providers.
@@ -141,7 +195,8 @@ Open **Settings → Ward Council**. The section has five inner tabs — **Genera
 - **Restore points** — off by default. When on, snapshots the workspace into hidden git refs at turn boundaries; **keep** sets how many per session (1–100, default 20) and **also snapshot before mutating tools** (on by default) captures before writes/edits/bash. Advisors can then recommend rewinds and verify completion against the session baseline (see [How it works](#how-it-works)).
 - **Completion gate** — on by default (prompt-only, zero extra calls). The advisor verifies work is actually done before the agent claims completion, demands an honest done/not-done report otherwise, and reminds the agent to commit the accepted state (see [How it works](#how-it-works)).
 - **Skip tiny deltas (chars)** — `0` = review everything; `>0` = skip transcript updates smaller than this.
-**Advisors tab:**
+
+### Advisors tab
 
 - **Add from preset** — one click creates a ready-made advisor from one of the 25 built-in personas (see [Presets](#presets)).
 - **Advisors** — the roster, as collapsible cards (**collapsed by default** — click a card header to expand; newly added advisors expand automatically). Per advisor:
@@ -155,11 +210,11 @@ Open **Settings → Ward Council**. The section has five inner tabs — **Genera
   - **memory engines** — which long-term memory engines this advisor recalls from and writes to (see the **Memory** tab). None checked = the built-in plaintext store only; unavailable engines are grayed out here too,
   - per-advisor enable toggle.
 
-**Workspaces tab:**
+### Workspaces tab
 
 - A **workspace × advisor matrix**: rows are known workspaces (every workspace open in a session plus every pattern already configured), columns are advisors. A checked cell means that workspace pattern is in the advisor's list; toggling rewrites the same `workspaces` field the card editor uses. An advisor with no patterns runs everywhere — its cells render indeterminate, and checking one scopes it to that single workspace. A free-text row lets you add a workspace pattern that no session has opened yet.
 
-**Memory tab (v0.7.0):**
+### Memory tab
 
 Advisors get persistent, workspace-scoped memory: before each review they **recall** relevant lessons into their context, and after a review they may **write** a durable lesson back. Multiple engines can run at once, and each advisor picks its own engines on its card.
 
@@ -180,14 +235,10 @@ Advisors get persistent, workspace-scoped memory: before each review they **reca
 - **Preset migration** — builtin engine definitions are versioned. When a release changes a preset (tool names, transport, spawn command), your persisted copy of the old preset is re-derived from the new one automatically (your enable/disable toggles carry over; custom engines are never touched).
 - **Pending lessons** — when the write gate is Approval, advisor-proposed lessons wait here with their tags and target engines; **Approve** stores them, **Discard** drops them. Pending writes persist per workspace and survive restarts.
 
-**Monitor tab:**
+### Monitor tab
 
 - **Live status** — per-session advisor status dots, backlog, review/advice counters, last errors, restore-point counts.
 - **Activity feed** — the service-wide event ring (≤100, newest first): reviews with duration, advice deliveries with severity+channel, retries, quota cooldowns, halts, blocker interventions, restore-point snapshots, session attach/detach. The same feed powers the optional sidebar tab.
-
-Settings live in the `dsh-omp-advisor` namespace and apply **live** — no restart needed when you edit the roster.
-
-Advisor model calls go through `ctx.llm.stream` with the provider route + model id you picked, so billing, routing, and failover behave exactly like your other DSH model traffic.
 
 ## Presets
 
@@ -251,7 +302,7 @@ npm test           # 128 unit tests over the ported semantics + memory
 npm run typecheck  # tsc --noEmit (DSH packages shimmed)
 ```
 
-Layout: `src/` host plugin (settings, service, runtime, advisor loop, tools, delivery, quarantine, delta, restore-points), `src/client/` settings section (multi-tab) + presets + optional better-sidebar tab (`sidebar.tsx`), `src/prompts/` ported advisor prompts (incl. the completion-gate protocol), `skills/` the 250 packaged advisor skills (source of truth for the build-time embeds), `scripts/gen-skills.mjs` the skill embed generator, `test/` node:test suite (git-backed tests run against real temporary repositories and skip cleanly when git is absent; client modules are tested through a minimal React stub).
+Layout: `src/` host plugin (settings, service, runtime, advisor loop, tools, delivery, quarantine, delta, restore-points, memory), `src/client/` settings section (multi-tab) + presets + optional better-sidebar tab (`sidebar.tsx`), `src/prompts/` ported advisor prompts (incl. the completion-gate protocol and the memory-recall protocol), `skills/` the 250 packaged advisor skills (source of truth for the build-time embeds), `scripts/gen-skills.mjs` the skill embed generator, `test/` node:test suite (git-backed tests run against real temporary repositories and skip cleanly when git is absent; client modules are tested through a minimal React stub).
 
 ## Attribution & license
 
@@ -271,5 +322,5 @@ The optional sidebar monitor tab integrates with [omdsh-dev/DSH-better-sidebar](
 - No mutating-tool grants for advisors yet (oh-my-pi's WATCHDOG.yml roster). Blocker intervention (opt-in step cancellation) is the first intervention layer; full WATCHDOG grants remain targeted for a later release behind the DSH approval flow.
 - No in-session "advisors watching" badge yet; health is visible in the settings Monitor tab and — with dsh-better-sidebar installed — in the sidebar Advisors tab (status badge included).
 - Status panel polls every 5 s while the settings section is open (sidebar tab: 2 s while registered); no push yet. The activity ring is in-memory only (≤100 events, lost on restart) — monitoring, not audit.
-- **Advisor memory shipped in v0.7.0** (see the **Memory tab** above): per-workspace plaintext lesson store with deterministic zero-LLM recall, a pluggable engine roster (OpenViking / Hindsight / MisakaNet / mem0 / any custom MCP server), per-advisor engine toggles, and an approval / auto / read-only write gate. Still ahead: composing memory with restore points (rewind lessons) and the completion gate (compromise records), MCP connection pooling, a dedicated memory browser, and per-engine write confirmations.
+- Advisor memory (v0.7.0) still ahead: composing memory with restore points (rewind lessons) and the completion gate (compromise records), MCP connection pooling, a dedicated memory browser, and per-engine write confirmations.
 - Web profile UI; other profiles can still configure the namespace by hand.
