@@ -44,6 +44,19 @@ function isPermanentFailure(error: unknown): boolean {
   )
 }
 
+/**
+ * True when the review failed because the advisor's accumulated context exceeds
+ * the model's window. Retrying the same bloated history can never succeed, so
+ * this is handled by resetting the conversation (shrink) rather than by the
+ * ordinary auto-retry path — which would otherwise loop forever on it.
+ */
+function isContextOverflow(error: unknown): boolean {
+  const message = String(error instanceof Error ? error.message : error)
+  return /CONTEXT_WINDOW_EXCEEDED|context.?length|longer than the model|maximum context length|context_length_exceeded|prompt is too long|input.{0,40}too long/i.test(
+    message
+  )
+}
+
 interface AdvisorSlot {
   entry: AdvisorEntry
   loop: AdvisorLoop
@@ -67,6 +80,8 @@ interface ReviewQueueItem {
   retryText?: string
   /** Auto-retry attempt number (0 = first try). */
   attempt: number
+  /** Set after a context-overflow reset: a second overflow halts instead of looping. */
+  overflowRecovered?: boolean
 }
 
 /** Shape of the `turn/end` session event data the runtime watches for failures. */
@@ -315,6 +330,31 @@ export class SessionAdvisorRuntime {
             slot.queued = []
             slot.backlog = 0
             this.host.recordEvent?.('halted', slot.entry.name, slot.lastError)
+            return
+          }
+          if (isContextOverflow(error)) {
+            // The advisor's accumulated history outgrew the model's context
+            // window. Retrying the same bloated context can never succeed (and
+            // with an unlimited retry cap would loop forever), so reset the
+            // conversation to shrink it and retry once; a second overflow means
+            // a single delta itself is too big, so halt instead of looping.
+            if (!item.overflowRecovered) {
+              slot.loop.resetConversation()
+              slot.queued.unshift({
+                inProgress: item.inProgress,
+                retryText: text,
+                attempt: item.attempt + 1,
+                overflowRecovered: true
+              })
+              slot.backlog = slot.queued.length
+              this.host.recordEvent?.('context-reset', slot.entry.name, 'advisor history exceeded model context; conversation reset')
+              this.scheduleDrain(slot, this.autoRetryDelayMs)
+              return
+            }
+            slot.status = 'halted'
+            slot.queued = []
+            slot.backlog = 0
+            this.host.recordEvent?.('halted', slot.entry.name, `context overflow persists after reset: ${slot.lastError}`)
             return
           }
           if (this.autoRetry && (this.autoRetryMax === 0 || item.attempt < this.autoRetryMax)) {

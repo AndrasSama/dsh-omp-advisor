@@ -900,6 +900,19 @@ function scriptedLlm(turns) {
             yield { type: 'finish', reason: { kind: 'error', failure: { message: '429 rate limited', code: 'RATE_LIMIT' } } }
             return
           }
+          if (script === 'OVERFLOW') {
+            yield {
+              type: 'finish',
+              reason: {
+                kind: 'error',
+                failure: {
+                  message: "400: The input (636503 tokens) is longer than the model's context length (262144 tokens).",
+                  code: 'CONTEXT_WINDOW_EXCEEDED'
+                }
+              }
+            }
+            return
+          }
           for (const block of script) {
             yield { type: 'block-end', index: 0, block }
           }
@@ -1008,6 +1021,46 @@ test('auto-retry cap 0 retries without bound until the review succeeds', async (
   assert.equal(llm.calls.length, 6)
   assert.equal(agent.injected.length, 1)
   assert.match(agent.injected[0].text, /finally made it/)
+  runtime.dispose()
+})
+
+test('context overflow resets the advisor conversation and recovers on the next attempt', async () => {
+  const agent = stubAgent()
+  const llm = scriptedLlm([
+    'OVERFLOW',
+    [{ type: 'tool-call', id: 'c1', name: 'advise', arguments: JSON.stringify({ note: 'recovered after context reset', severity: 'nit' }) }]
+  ])
+  const runtime = runtimeWithEvents({
+    llm,
+    agent,
+    events: oneUserEvent,
+    settings: { ...retryBaseSettings, autoRetryMax: 0 }
+  })
+  runtime.autoRetryDelayMs = 20
+  runtime.enqueueReview(false)
+  await new Promise(resolve => setTimeout(resolve, 250))
+  // overflow attempt + one recovery attempt after the conversation reset
+  assert.equal(llm.calls.length, 2)
+  assert.equal(agent.injected.length, 1)
+  assert.match(agent.injected[0].text, /recovered after context reset/)
+  runtime.dispose()
+})
+
+test('persistent context overflow halts after one reset instead of retrying forever', async () => {
+  const agent = stubAgent()
+  const llm = scriptedLlm(['OVERFLOW'])
+  const runtime = runtimeWithEvents({
+    llm,
+    agent,
+    events: oneUserEvent,
+    settings: { ...retryBaseSettings, autoRetryMax: 0 }
+  })
+  runtime.autoRetryDelayMs = 20
+  runtime.enqueueReview(false)
+  await new Promise(resolve => setTimeout(resolve, 300))
+  // initial attempt + exactly one post-reset retry, then halt — never unbounded
+  assert.equal(llm.calls.length, 2)
+  assert.equal(agent.injected.length, 0)
   runtime.dispose()
 })
 
