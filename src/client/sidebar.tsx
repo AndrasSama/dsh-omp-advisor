@@ -38,7 +38,7 @@ import {
   type WorkspaceAdvisorEntry
 } from '../advisor-workspace'
 
-const { useEffect, useState } = React
+const { useEffect, useRef, useState } = React
 
 const TAB_ID = 'omp-advisor:advisors'
 const POLL_MS = 2000
@@ -277,15 +277,60 @@ const actionButton: React.CSSProperties = {
   font: 'inherit',
   fontSize: 11
 }
-const presetSelect: React.CSSProperties = {
-  border: '1px solid var(--dsh-border, rgba(128,128,128,0.3))',
-  borderRadius: 999,
-  padding: '1px 8px',
-  background: 'transparent',
-  color: 'inherit',
-  font: 'inherit',
-  fontSize: 11,
-  maxWidth: 180
+/**
+ * Best-effort dark-scheme detection, dependency-free (the sidebar is an
+ * optional probe, so we must NOT import better-sidebar's theme module). The
+ * DSH/better-sidebar shell marks the resolved scheme on <body
+ * data-ds-dark-theme> together with `html { color-scheme }`; fall back to the
+ * OS media query before the presenter has run. Mirrors the logic in
+ * dsh-better-sidebar's theme.ts without coupling to it.
+ */
+function isDarkSchemeLocal(): boolean {
+  if (typeof document === 'undefined') return true
+  if (document.body.hasAttribute('data-ds-dark-theme')) return true
+  const scheme = getComputedStyle(document.documentElement).colorScheme
+  if (scheme.includes('dark')) return true
+  if (scheme.includes('light')) return false
+  return typeof matchMedia !== 'undefined' && matchMedia('(prefers-color-scheme: dark)').matches
+}
+
+/** Opaque, theme-aware surface for the custom preset dropdown panel. A native
+ * <select> popup is OS-rendered and ignores the app theme, so the panel is
+ * self-rendered with a solid scheme-appropriate background. */
+function presetMenuPanel(dark: boolean): React.CSSProperties {
+  return {
+    position: 'absolute',
+    top: 'calc(100% + 4px)',
+    left: 0,
+    zIndex: 30,
+    minWidth: 180,
+    maxWidth: 240,
+    maxHeight: 240,
+    overflowY: 'auto',
+    display: 'flex',
+    flexDirection: 'column',
+    padding: 4,
+    borderRadius: 10,
+    // Scheme-aware edge: the neutral var fallback is too subtle on dark surfaces.
+    border: dark ? '1px solid rgba(255,255,255,0.18)' : '1px solid rgba(0,0,0,0.15)',
+    background: dark ? '#2b2b30' : '#ffffff',
+    color: dark ? '#f0f0f2' : '#1c1c1e',
+    boxShadow: dark ? '0 8px 24px rgba(0,0,0,0.55)' : '0 6px 20px rgba(0,0,0,0.14)'
+  }
+}
+
+function presetMenuItem(dark: boolean, hovered: boolean): React.CSSProperties {
+  return {
+    textAlign: 'left',
+    border: 'none',
+    borderRadius: 7,
+    padding: '5px 9px',
+    font: 'inherit',
+    fontSize: 12,
+    cursor: 'pointer',
+    color: 'inherit',
+    background: hovered ? (dark ? 'rgba(255,255,255,0.09)' : 'rgba(0,0,0,0.06)') : 'transparent'
+  }
 }
 
 function formatTime(time: number): string {
@@ -327,6 +372,23 @@ function AdvisorsMonitorTab(props: { scopedSessionId?: string }): React.ReactEle
     }
   }, [])
 
+  // Custom "add from preset" dropdown (theme-aware; replaces the native select).
+  const [presetMenuOpen, setPresetMenuOpen] = useState(false)
+  const [hoveredPreset, setHoveredPreset] = useState<string | null>(null)
+  const presetMenuRef = useRef<HTMLDivElement | null>(null)
+  const dark = isDarkSchemeLocal()
+  useEffect(() => {
+    if (!presetMenuOpen) return
+    const onDocPointerDown = (event: MouseEvent): void => {
+      if (presetMenuRef.current && !presetMenuRef.current.contains(event.target as Node)) {
+        setPresetMenuOpen(false)
+        setHoveredPreset(null)
+      }
+    }
+    document.addEventListener('mousedown', onDocPointerDown)
+    return () => document.removeEventListener('mousedown', onDocPointerDown)
+  }, [presetMenuOpen])
+
   const sessions = [...(snapshot?.sessions ?? [])].sort((a, b) => {
     if (a.sessionId === scoped) return -1
     if (b.sessionId === scoped) return 1
@@ -354,27 +416,6 @@ function AdvisorsMonitorTab(props: { scopedSessionId?: string }): React.ReactEle
   const disableHere = (name: string): void => {
     if (!workspaceCwd || !name) return
     runToggle(setAdvisorWorkspaceRpc(name, workspaceCwd, false), `disable "${name}"`)
-  }
-  const addAdvisor = (): void => {
-    setActionError(null)
-    void (async () => {
-      try {
-        const cat = catalog ?? (await loadModelCatalog())
-        const firstGroup = cat?.groups.find(group => group.models.length > 0)
-        const firstModel = firstGroup?.models[0]
-        // The host re-generates a unique name + sanitizes on append.
-        const entry = buildWorkspaceAdvisor({
-          name: 'advisor',
-          provider: firstGroup?.id ?? '',
-          model: firstModel?.id ?? '',
-          cwd: workspaceCwd
-        })
-        await addWorkspaceAdvisorRpc(entry)
-        pollOnce()
-      } catch (err: unknown) {
-        setActionError(`add advisor: ${String(err instanceof Error ? err.message : err)}`)
-      }
-    })()
   }
   const addFromPreset = (presetId: string): void => {
     const preset = ADVISOR_PRESETS.find(item => item.id === presetId)
@@ -574,27 +615,36 @@ function AdvisorsMonitorTab(props: { scopedSessionId?: string }): React.ReactEle
             </>
           )}
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginTop: 4 }}>
-            <button style={actionButton} onClick={addAdvisor}>
-              Add advisor
-            </button>
-            <select
-              style={presetSelect}
-              defaultValue=""
-              onChange={event => {
-                const presetId = event.target.value
-                event.target.value = ''
-                if (presetId) addFromPreset(presetId)
-              }}
-            >
-              <option value="" disabled>
-                Add from preset…
-              </option>
-              {ADVISOR_PRESETS.map(preset => (
-                <option key={preset.id} value={preset.id}>
-                  {preset.name}
-                </option>
-              ))}
-            </select>
+            <div ref={presetMenuRef} style={{ position: 'relative', display: 'inline-block' }}>
+              <button
+                style={actionButton}
+                aria-haspopup="menu"
+                aria-expanded={presetMenuOpen}
+                onClick={() => setPresetMenuOpen(open => !open)}
+              >
+                Add advisor ▾
+              </button>
+              {presetMenuOpen && (
+                <div style={presetMenuPanel(dark)} role="menu">
+                  {ADVISOR_PRESETS.map(preset => (
+                    <button
+                      key={preset.id}
+                      role="menuitem"
+                      style={presetMenuItem(dark, hoveredPreset === preset.id)}
+                      onMouseEnter={() => setHoveredPreset(preset.id)}
+                      onMouseLeave={() => setHoveredPreset(null)}
+                      onClick={() => {
+                        setPresetMenuOpen(false)
+                        setHoveredPreset(null)
+                        addFromPreset(preset.id)
+                      }}
+                    >
+                      {preset.name}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
             {!catalog && <span style={hint}>loading models…</span>}
           </div>
         </div>
