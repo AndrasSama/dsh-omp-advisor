@@ -237,6 +237,8 @@ export interface AdvisorStatusView {
   reviewsCompleted: number
   adviceDelivered: number
   lastError?: string
+  /** Why a halted advisor stopped: 'context-overflow' is recoverable by resuming. */
+  haltReason?: 'context-overflow' | 'permanent'
 }
 
 /** Per-session snapshot surfaced through the RPC channel. */

@@ -80,7 +80,7 @@ primary agent ──► session log ──► delta renderer ──► advisor m
   - A failed **primary-model turn** (`turn/end` with `reason.kind: "error"`) receives an automatic *"continue from where you left off"* followup message after the same delay, bounded per failure episode and reset by any completed turn.
   - Attempt cap: `1–999`, or **`0` = unlimited** (the message labels the cap `∞`). User aborts and permanent errors (unknown model/provider) never retry — even with an unlimited cap. Toggle the whole feature off with **Auto-retry failures**.
 - **Containment (ported).** Output quarantine (unavailable-tool requests, output-only destructive directives), 3-consecutive-failure backlog drop, permanent-error halt until settings change, quota/rate-limit cooldown pause. The advisor **never blocks the primary agent** — a deliberate, safer deviation from oh-my-pi's catch-up wait.
-- **Context-overflow recovery (v0.7.3).** If an advisor's accumulated history outgrows the model's context window, the runtime resets that advisor's conversation (shrinking it back to system prompt + current delta) and retries once — instead of re-sending the same bloated context on an unlimited retry loop. A second overflow (a single delta too big on its own) halts the advisor rather than spinning forever.
+- **Context-overflow recovery (v0.7.3).** If an advisor's accumulated history outgrows the model's context window, the runtime resets that advisor's conversation (shrinking it back to system prompt + current delta) and retries once — instead of re-sending the same bloated context on an unlimited retry loop. A second overflow (a single delta too big on its own) halts the advisor rather than spinning forever. The Monitor then shows the halt reason plus a **Resume** button (v0.7.4): swap the advisor to a larger-context model in the Advisors tab and click Resume to bring it straight back — no restart needed.
 
 ### Intervention
 
@@ -238,7 +238,7 @@ Advisors get persistent, workspace-scoped memory: before each review they **reca
 
 ### Monitor tab
 
-- **Live status** — per-session advisor status dots, backlog, review/advice counters, last errors, restore-point counts.
+- **Live status** — per-session advisor status dots, backlog, review/advice counters, last errors, restore-point counts. A halted / errored / quota-exhausted advisor gets a **Resume** button that resets its conversation and re-arms it; a context-overflow halt also shows a hint to assign that advisor a larger-context model in the Advisors tab first.
 - **Activity feed** — the service-wide event ring (≤100, newest first): reviews with duration, advice deliveries with severity+channel, retries, quota cooldowns, halts, blocker interventions, restore-point snapshots, session attach/detach. The same feed powers the optional sidebar tab.
 
 ## Presets
@@ -299,7 +299,7 @@ The plugin packages **250 advisor skills** under [`skills/<id>/SKILL.md`](./skil
 ```bash
 npm install        # dev deps only; DSH packages are runtime-provided
 npm run build      # gen-skills + host ESM (lib/index.js) + client CJS ModuleLoader bundle (lib/client.js)
-npm test           # 130 unit tests over the ported semantics + memory
+npm test           # 132 unit tests over the ported semantics + memory
 npm run typecheck  # tsc --noEmit (DSH packages shimmed)
 ```
 

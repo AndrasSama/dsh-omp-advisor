@@ -1061,6 +1061,67 @@ test('persistent context overflow halts after one reset instead of retrying fore
   // initial attempt + exactly one post-reset retry, then halt — never unbounded
   assert.equal(llm.calls.length, 2)
   assert.equal(agent.injected.length, 0)
+  // halted with a recoverable reason surfaced to the Monitor
+  const halted = runtime.snapshot().advisors[0]
+  assert.equal(halted.status, 'halted')
+  assert.equal(halted.haltReason, 'context-overflow')
+  runtime.dispose()
+})
+
+test('resume revives a context-overflow-halted advisor and it reviews again', async () => {
+  const agent = stubAgent()
+  const adviseBlock = [
+    { type: 'tool-call', id: 'c1', name: 'advise', arguments: JSON.stringify({ note: 'back after reset', severity: 'nit' }) }
+  ]
+  const llm = scriptedLlm(['OVERFLOW', 'OVERFLOW', adviseBlock])
+  const events = [{ type: 'user/message', data: { content: [{ type: 'text', text: 'hello advisor' }] } }]
+  const runtime = runtimeWithEvents({
+    llm,
+    agent,
+    events,
+    settings: { ...retryBaseSettings, autoRetryMax: 0 }
+  })
+  runtime.autoRetryDelayMs = 20
+  runtime.enqueueReview(false)
+  await new Promise(resolve => setTimeout(resolve, 300))
+  // persistent overflow -> halted with the recoverable reason
+  assert.equal(runtime.snapshot().advisors[0].status, 'halted')
+  assert.equal(runtime.snapshot().advisors[0].haltReason, 'context-overflow')
+  // user swaps to a bigger-context model, then hits Resume
+  assert.equal(runtime.setPaused('a', false), true)
+  assert.equal(runtime.snapshot().advisors[0].status, 'running')
+  assert.equal(runtime.snapshot().advisors[0].haltReason, undefined)
+  // new transcript activity -> the recovered advisor reviews and delivers
+  events.push({ type: 'user/message', data: { content: [{ type: 'text', text: 'more work after resume' }] } })
+  runtime.enqueueReview(false)
+  await new Promise(resolve => setTimeout(resolve, 150))
+  assert.equal(agent.injected.length, 1)
+  assert.match(agent.injected[0].text, /back after reset/)
+  runtime.dispose()
+})
+
+test('settings rebuild (model change) revives a halted advisor and clears the halt reason', async () => {
+  const agent = stubAgent()
+  const llm = scriptedLlm(['OVERFLOW'])
+  const runtime = runtimeWithEvents({
+    llm,
+    agent,
+    events: oneUserEvent,
+    settings: { ...retryBaseSettings, autoRetryMax: 0 }
+  })
+  runtime.autoRetryDelayMs = 20
+  runtime.enqueueReview(false)
+  await new Promise(resolve => setTimeout(resolve, 300))
+  assert.equal(runtime.snapshot().advisors[0].status, 'halted')
+  assert.equal(runtime.snapshot().advisors[0].haltReason, 'context-overflow')
+  // user picks a bigger-context model in the Advisors tab -> rebuild revives it
+  runtime.rebuild({
+    ...retryBaseSettings,
+    autoRetryMax: 0,
+    advisors: [{ name: 'a', provider: 'p', model: 'bigger-context-model', maxTurns: 2 }]
+  })
+  assert.equal(runtime.snapshot().advisors[0].status, 'running')
+  assert.equal(runtime.snapshot().advisors[0].haltReason, undefined)
   runtime.dispose()
 })
 

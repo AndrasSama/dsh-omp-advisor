@@ -66,6 +66,7 @@ interface AdvisorStatusView {
   reviewsCompleted: number
   adviceDelivered: number
   lastError?: string
+  haltReason?: string
 }
 
 interface EventEntryView {
@@ -181,6 +182,17 @@ const styles: Record<string, React.CSSProperties> = {
     color: 'rgb(220,110,110)',
     cursor: 'pointer',
     font: 'inherit'
+  },
+  resumeButton: {
+    border: '1px solid rgba(90,160,220,0.5)',
+    borderRadius: 999,
+    padding: '1px 9px',
+    background: 'transparent',
+    color: 'rgb(120,180,235)',
+    cursor: 'pointer',
+    font: 'inherit',
+    fontSize: 11,
+    marginLeft: 2
   },
   hint: { opacity: 0.6, fontSize: 12 },
   chip: {
@@ -1512,6 +1524,43 @@ export function createSettingsSection(ctx: ClientCtx): React.ComponentType<{ clo
         .then(() => memoryRescan())
         .catch((err: unknown) => setWriteError(String(err instanceof Error ? err.message : err)))
     }
+    // Resume a halted/errored/quota-exhausted advisor. The host resets its
+    // conversation and re-arms it; the 5s monitor poll confirms the real state,
+    // so we patch the chip optimistically for immediate feedback.
+    const resumeAdvisor = (sessionId: string, advisorName: string): void => {
+      void ctx.connection.rpc
+        .call('/dsh-omp-advisor', 'resume', { sessionId, advisor: advisorName })
+        .then(result => {
+          // rpc.call resolves ok:false envelopes rather than rejecting — unwrap
+          // so a rejected resume surfaces writeError instead of flashing a green
+          // chip. The inner value.ok is false when the session/advisor is unknown.
+          const value = unwrapRpcResult<{ ok?: boolean }>(result, 'advisor resume')
+          if (value?.ok === false) {
+            setWriteError(`advisor resume: no advisor "${advisorName}" in that session`)
+            return
+          }
+          setView(current =>
+            current
+              ? {
+                  ...current,
+                  sessions: (current.sessions ?? []).map(session =>
+                    session.sessionId === sessionId
+                      ? {
+                          ...session,
+                          advisors: session.advisors.map(advisor =>
+                            advisor.name === advisorName
+                              ? { ...advisor, status: 'running', haltReason: undefined, lastError: undefined }
+                              : advisor
+                          )
+                        }
+                      : session
+                  )
+                }
+              : current
+          )
+        })
+        .catch((err: unknown) => setWriteError(String(err instanceof Error ? err.message : err)))
+    }
 
     return (
       <div style={styles.root}>
@@ -1865,9 +1914,28 @@ export function createSettingsSection(ctx: ClientCtx): React.ComponentType<{ clo
                       {advisor.name} · {advisor.status}
                       {advisor.backlog > 0 ? ` · backlog ${advisor.backlog}` : ''}
                       {` · ${advisor.reviewsCompleted} reviews / ${advisor.adviceDelivered} notes`}
+                      {(advisor.status === 'halted' ||
+                        advisor.status === 'error' ||
+                        advisor.status === 'quota_exhausted') && (
+                        <button
+                          style={styles.resumeButton}
+                          title="Reset this advisor's conversation and resume reviewing"
+                          onClick={() => resumeAdvisor(session.sessionId, advisor.name)}
+                        >
+                          Resume
+                        </button>
+                      )}
                     </span>
                   ))}
                 </div>
+                {session.advisors
+                  .filter(advisor => advisor.status === 'halted' && advisor.haltReason === 'context-overflow')
+                  .map(advisor => (
+                    <span key={`${advisor.name}-ctxhint`} style={{ ...styles.hint, color: '#e0b050', whiteSpace: 'pre-wrap' }}>
+                      ⓘ {advisor.name}: its conversation outgrew the model's context window. Assign it a model with a
+                      larger context window in the Advisors tab, then click Resume.
+                    </span>
+                  ))}
                 {session.advisors
                   .filter(advisor => advisor.lastError)
                   .map(advisor => (

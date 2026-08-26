@@ -68,6 +68,8 @@ interface AdvisorSlot {
   adviceDelivered: number
   consecutiveFailures: number
   lastError?: string
+  /** Why the slot halted (drives the Monitor's recovery hint + Resume action). */
+  haltReason?: 'context-overflow' | 'permanent'
   quotaUntil?: number
   draining: boolean
   queued: ReviewQueueItem[]
@@ -177,6 +179,7 @@ export class SessionAdvisorRuntime {
           existing.status = entry.enabled === false ? 'paused' : 'running'
           existing.consecutiveFailures = 0
           existing.lastError = undefined
+          existing.haltReason = undefined
           existing.loop.resetConversation()
         } else if (entry.enabled === false) {
           existing.status = 'paused'
@@ -327,6 +330,7 @@ export class SessionAdvisorRuntime {
           this.host.recordEvent?.('review-failed', slot.entry.name, slot.lastError)
           if (isPermanentFailure(error)) {
             slot.status = 'halted'
+            slot.haltReason = 'permanent'
             slot.queued = []
             slot.backlog = 0
             this.host.recordEvent?.('halted', slot.entry.name, slot.lastError)
@@ -352,6 +356,7 @@ export class SessionAdvisorRuntime {
               return
             }
             slot.status = 'halted'
+            slot.haltReason = 'context-overflow'
             slot.queued = []
             slot.backlog = 0
             this.host.recordEvent?.('halted', slot.entry.name, `context overflow persists after reset: ${slot.lastError}`)
@@ -521,7 +526,8 @@ export class SessionAdvisorRuntime {
         backlog: slot.backlog,
         reviewsCompleted: slot.reviewsCompleted,
         adviceDelivered: slot.adviceDelivered,
-        ...(slot.lastError ? { lastError: slot.lastError } : {})
+        ...(slot.lastError ? { lastError: slot.lastError } : {}),
+        ...(slot.haltReason ? { haltReason: slot.haltReason } : {})
       })),
       recentNotes: [...this.recentNotes]
     }
@@ -595,8 +601,23 @@ export class SessionAdvisorRuntime {
       slot.status = 'paused'
       slot.queued = []
       slot.backlog = 0
+      slot.haltReason = undefined
     } else if (slot.status === 'paused') {
       slot.status = 'running'
+    } else if (slot.status === 'halted' || slot.status === 'error' || slot.status === 'quota_exhausted') {
+      // Manual resume of a stuck advisor (e.g. after a context-overflow halt):
+      // drop the bloated/failed conversation, clear the failure state, and
+      // re-arm with a fresh review so it starts immediately.
+      slot.loop.resetConversation()
+      slot.status = 'running'
+      slot.lastError = undefined
+      slot.haltReason = undefined
+      slot.consecutiveFailures = 0
+      slot.quotaUntil = undefined
+      slot.queued = [{ inProgress: false, attempt: 0 }]
+      slot.backlog = 1
+      this.host.recordEvent?.('resumed', slot.entry.name, 'manually resumed; conversation reset')
+      void this.drain(slot)
     }
     return true
   }
