@@ -101,7 +101,7 @@ primary agent ──► session log ──► delta renderer ──► advisor m
 ### Settings UI & monitoring
 
 - **Multi-tab settings UI.** The settings section is organized like the Plugin Market's inner tab bar: **General** (policy switches), **Advisors** (the roster — cards collapsed by default, click a header to expand), **Workspaces** (a workspace × advisor activation matrix over the same `workspaces` field), **Memory** (persistent advisor memory — pluggable engines, write gate, per-advisor engine toggles), and **Monitor** (live status + activity feed).
-- **Optional sidebar monitor tab.** When [dsh-better-sidebar](https://github.com/omdsh-dev/DSH-better-sidebar) is installed, the plugin registers an **Advisors** tab in the sidebar workbench: a **workspace-scoped** monitor: the tab follows the sidebar's session scope, so it shows this session's name and workspace, its attached advisors (status dot, review/advice counters, last error) and its activity feed — other sessions stay collapsed under "Other sessions", and the tab-strip badge counts only this session's advisors (`!` when one is halted/errored, hidden when none are attached here). Detection is a bounded runtime probe — **never a hard dependency**: without the sidebar the plugin loads and behaves exactly as before.
+- **Optional sidebar monitor + workspace manager tab.** When [dsh-better-sidebar](https://github.com/omdsh-dev/DSH-better-sidebar) is installed, the plugin registers an **Advisors** tab in the sidebar workbench. The tab follows the sidebar's session scope, so it shows this session's name and workspace, its attached advisors (status dot, review/advice counters, last error) and its activity feed — other sessions stay collapsed under "Other sessions", and the tab-strip badge counts only this session's advisors (`!` when one is halted/errored, hidden when none are attached here). Since v0.7.5 it is also a **workspace advisor manager**: it lists every configured advisor split into *Active in this workspace* and *Not active here* (reason: `off` vs `not in this workspace`), with inline **Enable here / Disable here** buttons (workspace-scoped: enable appends an exact `=<workspace>` pattern, disable removes it — or turns the advisor off everywhere when it matches all workspaces) and inline **Add advisor** / **Add from preset** (scoped to this workspace, first available model). All writes ride the same `update` settings channel as the dialog — no navigation to Settings needed. Detection is a bounded runtime probe — **never a hard dependency**: without the sidebar the plugin loads and behaves exactly as before.
 
 ## Install
 
@@ -299,7 +299,7 @@ The plugin packages **250 advisor skills** under [`skills/<id>/SKILL.md`](./skil
 ```bash
 npm install        # dev deps only; DSH packages are runtime-provided
 npm run build      # gen-skills + host ESM (lib/index.js) + client CJS ModuleLoader bundle (lib/client.js)
-npm test           # 132 unit tests over the ported semantics + memory
+npm test           # 139 unit tests over the ported semantics + memory
 npm run typecheck  # tsc --noEmit (DSH packages shimmed)
 ```
 

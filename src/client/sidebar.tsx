@@ -29,7 +29,17 @@
  * sessions".
  */
 import * as React from 'react'
-import { unwrapRpcResult } from './model-catalog'
+import { fetchModelCatalog, unwrapRpcResult, type ModelCatalog } from './model-catalog'
+import { ADVISOR_PRESETS } from './presets'
+import {
+  advisorMatchesWorkspacePatterns,
+  splitAdvisorsByWorkspace,
+  enableAdvisorHere,
+  disableAdvisorHere,
+  buildWorkspaceAdvisor,
+  uniqueAdvisorName,
+  type WorkspaceAdvisorEntry
+} from '../advisor-workspace'
 
 const { useEffect, useState } = React
 
@@ -66,11 +76,8 @@ interface SidebarEventView {
   detail?: string
 }
 
-interface SidebarSettingsAdvisor {
-  name?: string
-  enabled?: boolean
-  workspaces?: string[]
-}
+/** Full advisor entry (mirrors the settings view) so writes back lose no fields. */
+type SidebarSettingsAdvisor = WorkspaceAdvisorEntry
 
 interface SidebarSnapshot {
   sessions?: SidebarSessionView[]
@@ -80,6 +87,8 @@ interface SidebarSnapshot {
 
 interface ConnectionLike {
   rpc: { call(channel: string, endpoint: string, payload: unknown): Promise<unknown> }
+  /** Present on the real connection; used for the model catalog fetch. */
+  api?: { llm: { models(request: Record<string, never>): Promise<unknown> } }
 }
 
 /* ------------------------- shared store (badge + tab) ------------------------ */
@@ -174,6 +183,31 @@ function useSnapshot(): SidebarSnapshot | null {
   return cache
 }
 
+/* --------------------- workspace writes (settings `update` RPC) --------------------- */
+/* The sidebar manages advisors through the same `update` channel the settings
+ * section uses: read the full array from the polled snapshot, transform it with
+ * the pure ops in ../advisor-workspace, write it back whole. unwrapRpcResult
+ * throws on ok:false so a rejected write can never flash a false success. */
+
+async function writeAdvisors(next: WorkspaceAdvisorEntry[]): Promise<void> {
+  const connection = connectionRef
+  if (!connection) throw new Error('no connection')
+  const result = await connection.rpc.call('/dsh-omp-advisor', 'update', {
+    patch: { advisors: next }
+  })
+  unwrapRpcResult<{ settings: unknown }>(result, 'advisor workspace update')
+}
+
+function loadModelCatalog(): Promise<ModelCatalog | null> {
+  const connection = connectionRef
+  if (!connection || typeof connection.api !== 'object' || connection.api === null) {
+    return Promise.resolve(null)
+  }
+  return fetchModelCatalog(connection as unknown as Parameters<typeof fetchModelCatalog>[0]).catch(
+    () => null
+  )
+}
+
 /* --------------------------------- styles ----------------------------------- */
 
 const STATUS_COLORS: Record<string, string> = {
@@ -226,6 +260,26 @@ const chip: React.CSSProperties = {
   border: '1px solid var(--dsh-border, rgba(128,128,128,0.25))',
   fontSize: 11
 }
+const actionButton: React.CSSProperties = {
+  border: '1px solid var(--dsh-border, rgba(128,128,128,0.3))',
+  borderRadius: 999,
+  padding: '1px 9px',
+  background: 'transparent',
+  color: 'inherit',
+  cursor: 'pointer',
+  font: 'inherit',
+  fontSize: 11
+}
+const presetSelect: React.CSSProperties = {
+  border: '1px solid var(--dsh-border, rgba(128,128,128,0.3))',
+  borderRadius: 999,
+  padding: '1px 8px',
+  background: 'transparent',
+  color: 'inherit',
+  font: 'inherit',
+  fontSize: 11,
+  maxWidth: 180
+}
 
 function formatTime(time: number): string {
   const date = new Date(time)
@@ -234,16 +288,6 @@ function formatTime(time: number): string {
 }
 
 /* ------------------------------- tab component ------------------------------- */
-
-/** Client mirror of the host's advisorMatchesWorkspace (substring patterns, '=' = exact). */
-function matchesWorkspace(patterns: string[] | undefined, cwd: string | undefined): boolean {
-  const list = (patterns ?? []).map(pattern => pattern.trim()).filter(pattern => pattern !== '')
-  if (list.length === 0) return true
-  if (!cwd) return false
-  return list.some(pattern =>
-    pattern.startsWith('=') ? cwd === pattern.slice(1).trim() : cwd.includes(pattern)
-  )
-}
 
 function basename(path: string | undefined): string | undefined {
   if (!path) return undefined
@@ -263,6 +307,19 @@ function AdvisorsMonitorTab(props: { scopedSessionId?: string }): React.ReactEle
     return () => setScope(null)
   }, [scoped])
 
+  // Model catalog for the inline "add advisor" actions (first available model).
+  const [catalog, setCatalog] = useState<ModelCatalog | null>(null)
+  const [actionError, setActionError] = useState<string | null>(null)
+  useEffect(() => {
+    let cancelled = false
+    void loadModelCatalog().then(result => {
+      if (!cancelled) setCatalog(result)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
   const sessions = [...(snapshot?.sessions ?? [])].sort((a, b) => {
     if (a.sessionId === scoped) return -1
     if (b.sessionId === scoped) return 1
@@ -271,12 +328,78 @@ function AdvisorsMonitorTab(props: { scopedSessionId?: string }): React.ReactEle
   const events = snapshot?.recentEvents ?? []
   const configured = snapshot?.settings?.advisors ?? []
 
+  // Workspace manager: split the configured advisors against the scoped
+  // session's workspace and expose inline enable/disable/add writes.
+  const workspaceCwd = scoped ? sessions.find(session => session.sessionId === scoped)?.cwd : undefined
+  const advisorsList = configured as WorkspaceAdvisorEntry[]
+  const workspaceSplit = workspaceCwd ? splitAdvisorsByWorkspace(advisorsList, workspaceCwd) : null
+
+  const runWrite = (next: WorkspaceAdvisorEntry[], label: string): void => {
+    setActionError(null)
+    void writeAdvisors(next)
+      .then(() => pollOnce())
+      .catch((err: unknown) => setActionError(`${label}: ${String(err instanceof Error ? err.message : err)}`))
+  }
+  const enableHere = (name: string): void => {
+    if (!workspaceCwd || !name) return
+    runWrite(enableAdvisorHere(advisorsList, name, workspaceCwd), `enable "${name}"`)
+  }
+  const disableHere = (name: string): void => {
+    if (!workspaceCwd || !name) return
+    runWrite(disableAdvisorHere(advisorsList, name, workspaceCwd), `disable "${name}"`)
+  }
+  const addAdvisor = (): void => {
+    setActionError(null)
+    void (async () => {
+      try {
+        const cat = catalog ?? (await loadModelCatalog())
+        const firstGroup = cat?.groups.find(group => group.models.length > 0)
+        const firstModel = firstGroup?.models[0]
+        const entry = buildWorkspaceAdvisor({
+          name: uniqueAdvisorName('advisor', advisorsList),
+          provider: firstGroup?.id ?? '',
+          model: firstModel?.id ?? '',
+          cwd: workspaceCwd
+        })
+        await writeAdvisors([...advisorsList, entry])
+        pollOnce()
+      } catch (err: unknown) {
+        setActionError(`add advisor: ${String(err instanceof Error ? err.message : err)}`)
+      }
+    })()
+  }
+  const addFromPreset = (presetId: string): void => {
+    const preset = ADVISOR_PRESETS.find(item => item.id === presetId)
+    if (!preset) return
+    setActionError(null)
+    void (async () => {
+      try {
+        const cat = catalog ?? (await loadModelCatalog())
+        const firstGroup = cat?.groups.find(group => group.models.length > 0)
+        const firstModel = firstGroup?.models[0]
+        const entry = buildWorkspaceAdvisor({
+          name: uniqueAdvisorName(preset.name, advisorsList),
+          provider: firstGroup?.id ?? '',
+          model: firstModel?.id ?? '',
+          cwd: workspaceCwd,
+          preset
+        })
+        await writeAdvisors([...advisorsList, entry])
+        pollOnce()
+      } catch (err: unknown) {
+        setActionError(`add "${preset.name}": ${String(err instanceof Error ? err.message : err)}`)
+      }
+    })()
+  }
+
   const renderSessionCard = (session: SidebarSessionView): React.ReactElement => {
     const isScoped = session.sessionId === scoped
     const name = session.title || `Session ${session.sessionId.slice(0, 8)}`
     const dir = basename(session.cwd)
     const matching = session.cwd
-      ? configured.filter(entry => entry.enabled !== false && matchesWorkspace(entry.workspaces, session.cwd))
+      ? configured.filter(
+          entry => entry.enabled !== false && advisorMatchesWorkspacePatterns(entry.workspaces, session.cwd)
+        )
       : []
     return (
       <div
@@ -385,6 +508,87 @@ function AdvisorsMonitorTab(props: { scopedSessionId?: string }): React.ReactEle
         </div>
       )}
       {scopedSession && renderSessionCard(scopedSession)}
+      {scoped && workspaceCwd && workspaceSplit && (
+        <div style={cardStyle}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+            <strong>Advisors — this workspace</strong>
+            <span style={chip} title={workspaceCwd}>
+              {basename(workspaceCwd)}
+            </span>
+          </div>
+          {actionError && <span style={{ ...hint, color: '#dc7070' }}>{actionError}</span>}
+          {advisorsList.length === 0 ? (
+            <span style={hint}>No advisors configured yet — add one below.</span>
+          ) : (
+            <>
+              {workspaceSplit.active.map((entry, index) => {
+                const live = scopedSession?.advisors.find(advisor => advisor.name === entry.name)
+                return (
+                  <div
+                    key={`active-${index}-${entry.name ?? ''}`}
+                    style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}
+                  >
+                    <span
+                      title={live ? live.status : 'active here'}
+                      style={{
+                        width: 8,
+                        height: 8,
+                        borderRadius: '50%',
+                        background: live ? STATUS_COLORS[live.status] ?? '#8a8a8a' : '#4caf7d',
+                        display: 'inline-block'
+                      }}
+                    />
+                    <span style={{ fontWeight: 600 }}>{entry.name || 'unnamed'}</span>
+                    <span style={hint}>{live ? live.status : 'active here'}</span>
+                    <button style={actionButton} onClick={() => disableHere(entry.name ?? '')}>
+                      Disable here
+                    </button>
+                  </div>
+                )
+              })}
+              {workspaceSplit.inactive.map(({ entry, reason }, index) => (
+                <div
+                  key={`inactive-${index}-${entry.name ?? ''}`}
+                  style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', opacity: 0.75 }}
+                >
+                  <span
+                    style={{ width: 8, height: 8, borderRadius: '50%', background: '#8a8a8a', display: 'inline-block' }}
+                  />
+                  <span style={{ fontWeight: 600 }}>{entry.name || 'unnamed'}</span>
+                  <span style={chip}>{reason === 'off' ? 'off' : 'not in this workspace'}</span>
+                  <button style={actionButton} onClick={() => enableHere(entry.name ?? '')}>
+                    Enable here
+                  </button>
+                </div>
+              ))}
+            </>
+          )}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginTop: 4 }}>
+            <button style={actionButton} onClick={addAdvisor}>
+              Add advisor
+            </button>
+            <select
+              style={presetSelect}
+              defaultValue=""
+              onChange={event => {
+                const presetId = event.target.value
+                event.target.value = ''
+                if (presetId) addFromPreset(presetId)
+              }}
+            >
+              <option value="" disabled>
+                Add from preset…
+              </option>
+              {ADVISOR_PRESETS.map(preset => (
+                <option key={preset.id} value={preset.id}>
+                  {preset.name}
+                </option>
+              ))}
+            </select>
+            {!catalog && <span style={hint}>loading models…</span>}
+          </div>
+        </div>
+      )}
       {!scoped && sessions.map(renderSessionCard)}
       {others.length > 0 && (
         <details style={detailsStyle}>

@@ -12,6 +12,14 @@ import {
   AdvisorService,
   SessionAdvisorRuntime,
   advisorMatchesWorkspace,
+  workspacePatternMatches,
+  advisorMatchesWorkspacePatterns,
+  advisorActiveInWorkspace,
+  splitAdvisorsByWorkspace,
+  enableAdvisorHere,
+  disableAdvisorHere,
+  buildWorkspaceAdvisor,
+  uniqueAdvisorName,
   formatAdvisorBatchContent,
   normalizeSettings,
   normalizeSettingsLenient,
@@ -882,6 +890,107 @@ test('advisorMatchesWorkspace matches cwd substrings; empty patterns run everywh
   assert.equal(advisorMatchesWorkspace({ workspaces: ['novels'] }, '/home/sama/Qwest Chain'), false)
   assert.equal(advisorMatchesWorkspace({ workspaces: ['   ', 'novels'] }, '/home/sama/novels/draft'), true)
   assert.equal(advisorMatchesWorkspace({ workspaces: ['   '] }, '/home/sama/x'), true) // blank-only = everywhere
+})
+
+/* ------------------- sidebar workspace advisor manager (pure ops) ------------------- */
+
+const WS = '/home/sama/Qwest Chain'
+
+test('workspacePatternMatches: =exact vs substring vs blank', () => {
+  assert.equal(workspacePatternMatches(`=${WS}`, WS), true)
+  assert.equal(workspacePatternMatches(`=${WS}`, '/home/sama/Qwest Chain 2'), false)
+  assert.equal(workspacePatternMatches('Qwest', WS), true)
+  assert.equal(workspacePatternMatches('novels', WS), false)
+  assert.equal(workspacePatternMatches('   ', WS), false)
+  assert.equal(workspacePatternMatches('Qwest', undefined), false)
+})
+
+test('advisorMatchesWorkspacePatterns mirrors host semantics (empty = everywhere)', () => {
+  assert.equal(advisorMatchesWorkspacePatterns(undefined, WS), true)
+  assert.equal(advisorMatchesWorkspacePatterns([], WS), true)
+  assert.equal(advisorMatchesWorkspacePatterns(['Qwest'], WS), true)
+  assert.equal(advisorMatchesWorkspacePatterns(['novels'], WS), false)
+  assert.equal(advisorMatchesWorkspacePatterns(['   '], WS), true) // blank-only = everywhere
+})
+
+test('splitAdvisorsByWorkspace classifies active vs off vs not-in-workspace', () => {
+  const advisors = [
+    { name: 'everywhere', enabled: true }, // empty workspaces -> active
+    { name: 'here', enabled: true, workspaces: [`=${WS}`] }, // active
+    { name: 'elsewhere', enabled: true, workspaces: ['novels'] }, // not-in-workspace
+    { name: 'off-here', enabled: false, workspaces: [`=${WS}`] }, // off
+    { name: 'off-all', enabled: false } // off
+  ]
+  const { active, inactive } = splitAdvisorsByWorkspace(advisors, WS)
+  assert.deepEqual(active.map(entry => entry.name), ['everywhere', 'here'])
+  assert.deepEqual(
+    inactive.map(item => [item.entry.name, item.reason]),
+    [
+      ['elsewhere', 'not-in-workspace'],
+      ['off-here', 'off'],
+      ['off-all', 'off']
+    ]
+  )
+})
+
+test('enableAdvisorHere re-enables and appends =cwd only when needed, preserving fields', () => {
+  const base = [
+    { name: 'off-all', enabled: false, provider: 'p', model: 'm', instructions: 'keep me' },
+    { name: 'elsewhere', enabled: true, workspaces: ['novels'], provider: 'p2' },
+    { name: 'everywhere', enabled: false }
+  ]
+  const next = enableAdvisorHere(enableAdvisorHere(enableAdvisorHere(base, 'off-all', WS), 'elsewhere', WS), 'everywhere', WS)
+  const offAll = next.find(entry => entry.name === 'off-all')
+  assert.equal(offAll.enabled, true)
+  assert.equal(offAll.instructions, 'keep me') // untouched fields survive
+  assert.equal(offAll.workspaces, undefined) // empty list already matches everywhere -> nothing appended
+  const elsewhere = next.find(entry => entry.name === 'elsewhere')
+  assert.deepEqual(elsewhere.workspaces, ['novels', `=${WS}`]) // appended exact pattern
+  const everywhere = next.find(entry => entry.name === 'everywhere')
+  assert.equal(everywhere.enabled, true)
+  assert.equal(everywhere.workspaces, undefined)
+})
+
+test('disableAdvisorHere: empty list -> global off; removes matching; emptied -> global off', () => {
+  const advisors = [
+    { name: 'everywhere', enabled: true }, // empty -> global off
+    { name: 'only-here', enabled: true, workspaces: [`=${WS}`] }, // emptied -> global off
+    { name: 'multi', enabled: true, workspaces: [`=${WS}`, 'novels'] } // keep 'novels'
+  ]
+  const next = disableAdvisorHere(advisors, 'everywhere', WS)
+  const next2 = disableAdvisorHere(next, 'only-here', WS)
+  const next3 = disableAdvisorHere(next2, 'multi', WS)
+  assert.equal(next3.find(entry => entry.name === 'everywhere').enabled, false)
+  assert.equal(next3.find(entry => entry.name === 'only-here').enabled, false)
+  const multi = next3.find(entry => entry.name === 'multi')
+  assert.equal(multi.enabled, true)
+  assert.deepEqual(multi.workspaces, ['novels'])
+})
+
+test('buildWorkspaceAdvisor: blank vs preset, scoped to the workspace', () => {
+  const blank = buildWorkspaceAdvisor({ name: 'advisor', provider: 'p', model: 'm', cwd: WS })
+  assert.deepEqual(blank, {
+    name: 'advisor',
+    provider: 'p',
+    model: 'm',
+    maxTurns: 4,
+    enabled: true,
+    workspaces: [`=${WS}`]
+  })
+  const preset = { id: 'x', name: 'X', soul: 'be X', skills: ['a', 'b'] }
+  const fromPreset = buildWorkspaceAdvisor({ name: 'X', provider: 'p', model: 'm', cwd: WS, preset })
+  assert.equal(fromPreset.instructions, 'be X')
+  assert.deepEqual(fromPreset.skills, ['a', 'b'])
+  assert.equal(fromPreset.preset, 'x')
+  assert.deepEqual(fromPreset.workspaces, [`=${WS}`])
+  const noCwd = buildWorkspaceAdvisor({ name: 'n', provider: 'p', model: 'm' })
+  assert.equal(noCwd.workspaces, undefined) // no cwd -> not scoped
+})
+
+test('uniqueAdvisorName avoids collisions', () => {
+  const existing = [{ name: 'advisor' }, { name: 'advisor 2' }]
+  assert.equal(uniqueAdvisorName('advisor', existing), 'advisor 3')
+  assert.equal(uniqueAdvisorName('fresh', existing), 'fresh')
 })
 
 /* ----------------------- runtime: advisor review auto-retry ----------------------- */

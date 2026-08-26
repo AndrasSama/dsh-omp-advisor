@@ -5,6 +5,16 @@ export * from '../src/quarantine'
 export * from '../src/delta'
 export * from '../src/tools'
 export { normalizeSettings, normalizeSettingsLenient, advisorMatchesWorkspace } from '../src/settings'
+export {
+  workspacePatternMatches,
+  advisorMatchesWorkspacePatterns,
+  advisorActiveInWorkspace,
+  splitAdvisorsByWorkspace,
+  enableAdvisorHere,
+  disableAdvisorHere,
+  buildWorkspaceAdvisor,
+  uniqueAdvisorName
+} from '../src/advisor-workspace'
 export { AdvisorLoop } from '../src/advisor-loop'
 export { extractMemoryLesson } from '../src/advisor-loop'
 export { SessionAdvisorRuntime } from '../src/runtime'
