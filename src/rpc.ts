@@ -3,6 +3,9 @@
  * for the settings section. Endpoints:
  *   snapshot  {sessionId?}            -> one session's advisor state (or all)
  *   update    {patch}                 -> merge advisor settings; returns them
+ *   setAdvisorWorkspace {advisor, cwd, active}
+ *                                     -> atomic workspace-scoped enable/disable
+ *   addWorkspaceAdvisor {entry}       -> atomic append of one advisor
  *   pause     {sessionId, advisor}    -> pause one advisor
  *   resume    {sessionId, advisor}    -> resume one advisor
  *   reviewNow {sessionId}             -> queue an immediate review pass
@@ -96,6 +99,32 @@ export function registerAdvisorRpc(ctx: CordisContextLike, service: AdvisorServi
               return { ok: true, value: { settings: service.updateSettings(patch) } }
             } catch (error) {
               // Schema/validation rejections are user input errors.
+              return badRequest(String(error instanceof Error ? error.message : error))
+            }
+          }
+          case 'setAdvisorWorkspace': {
+            // Atomic workspace-scoped enable/disable (v0.7.6): load-modify-save
+            // host-side so the sidebar never read-modify-writes a stale array.
+            let advisor: string
+            let cwd: string
+            try {
+              advisor = string(payload.advisor, 'payload.advisor')
+              cwd = string(payload.cwd, 'payload.cwd')
+            } catch (error) {
+              return badRequest(String(error instanceof Error ? error.message : error))
+            }
+            const active = payload.active === true
+            try {
+              return { ok: true, value: { settings: service.setAdvisorWorkspace(advisor, cwd, active) } }
+            } catch (error) {
+              return badRequest(String(error instanceof Error ? error.message : error))
+            }
+          }
+          case 'addWorkspaceAdvisor': {
+            // Atomic append of one caller-built advisor (v0.7.6).
+            try {
+              return { ok: true, value: { settings: service.addWorkspaceAdvisor(payload.entry) } }
+            } catch (error) {
               return badRequest(String(error instanceof Error ? error.message : error))
             }
           }

@@ -1,6 +1,6 @@
 {
   "name": "dsh-omp-advisor",
-  "version": "0.7.5",
+  "version": "0.7.6",
   "description": "Ward Council — oh-my-pi advisor subsystem ported to DeepSeek Harness: independent reviewer models watch your agent's live transcript, investigate with read-only tools, and advise it. Advisors guide. The ward protects. The model executes.",
   "license": "SEE LICENSE IN LICENSE",
   "type": "module",

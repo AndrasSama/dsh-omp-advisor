@@ -39,6 +39,12 @@ const advisorEntrySchema = z.object({
     .description(
       'Workspace scoping: substring patterns matched against the session cwd (e.g. "Qwest Chain"). Empty = advisor runs in every session.'
     ),
+  disabledWorkspaces: z
+    .array(z.string())
+    .default([])
+    .description(
+      'Workspace exclusions: if the session cwd matches any pattern here the advisor does not run there, overriding `workspaces`. Written by the sidebar\'s workspace-scoped "Disable here".'
+    ),
   enabled: z.boolean().default(true).description('Per-advisor on/off toggle.'),
   memoryEngines: z
     .array(z.string())
@@ -170,7 +176,23 @@ function coerceMinDeltaChars(raw: unknown): number {
  * pattern prefixed with '=' matches the cwd EXACTLY — use it for broad paths
  * like '/home/sama' that would otherwise swallow every subdirectory.
  */
-export function advisorMatchesWorkspace(entry: Pick<AdvisorEntry, 'workspaces'>, cwd: string): boolean {
+export function advisorMatchesWorkspace(
+  entry: Pick<AdvisorEntry, 'workspaces' | 'disabledWorkspaces'>,
+  cwd: string
+): boolean {
+  // Exclusions win: if the cwd matches any disabledWorkspaces pattern the
+  // advisor does not run here, regardless of its inclusion patterns.
+  const disabled = (entry.disabledWorkspaces ?? [])
+    .map(pattern => pattern.trim())
+    .filter(pattern => pattern !== '')
+  if (
+    disabled.some(pattern => {
+      if (pattern.startsWith('=')) return cwd === pattern.slice(1).trim()
+      return cwd.includes(pattern)
+    })
+  ) {
+    return false
+  }
   const patterns = (entry.workspaces ?? [])
     .map(pattern => pattern.trim())
     .filter(pattern => pattern !== '')
@@ -217,6 +239,13 @@ export function normalizeSettings(raw: unknown): AdvisorSettings {
       ...(Array.isArray(entry.workspaces)
         ? {
             workspaces: entry.workspaces
+              .filter((w): w is string => typeof w === 'string' && w.trim() !== '')
+              .map(w => w.trim())
+          }
+        : {}),
+      ...(Array.isArray(entry.disabledWorkspaces)
+        ? {
+            disabledWorkspaces: entry.disabledWorkspaces
               .filter((w): w is string => typeof w === 'string' && w.trim() !== '')
               .map(w => w.trim())
           }
@@ -287,6 +316,9 @@ export function normalizeSettingsLenient(raw: unknown): AdvisorSettings {
       ...(typeof e.preset === 'string' ? { preset: e.preset } : {}),
       ...(Array.isArray(e.workspaces)
         ? { workspaces: e.workspaces.filter((w): w is string => typeof w === 'string') }
+        : {}),
+      ...(Array.isArray(e.disabledWorkspaces)
+        ? { disabledWorkspaces: e.disabledWorkspaces.filter((w): w is string => typeof w === 'string') }
         : {}),
       ...(Array.isArray(e.memoryEngines)
         ? { memoryEngines: e.memoryEngines.filter((m): m is string => typeof m === 'string') }

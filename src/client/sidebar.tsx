@@ -34,10 +34,7 @@ import { ADVISOR_PRESETS } from './presets'
 import {
   advisorMatchesWorkspacePatterns,
   splitAdvisorsByWorkspace,
-  enableAdvisorHere,
-  disableAdvisorHere,
   buildWorkspaceAdvisor,
-  uniqueAdvisorName,
   type WorkspaceAdvisorEntry
 } from '../advisor-workspace'
 
@@ -183,19 +180,29 @@ function useSnapshot(): SidebarSnapshot | null {
   return cache
 }
 
-/* --------------------- workspace writes (settings `update` RPC) --------------------- */
-/* The sidebar manages advisors through the same `update` channel the settings
- * section uses: read the full array from the polled snapshot, transform it with
- * the pure ops in ../advisor-workspace, write it back whole. unwrapRpcResult
- * throws on ok:false so a rejected write can never flash a false success. */
+/* --------------------- workspace writes (narrow atomic RPCs) --------------------- */
+/* The sidebar manages advisors through narrow host-side RPCs that load the
+ * CURRENT settings, modify just the target advisor, and save — never a
+ * read-modify-write of the whole (up-to-2s-stale) array, so a concurrent edit in
+ * the settings dialog is not clobbered. unwrapRpcResult throws on ok:false so a
+ * rejected write can never flash a false success. */
 
-async function writeAdvisors(next: WorkspaceAdvisorEntry[]): Promise<void> {
+async function setAdvisorWorkspaceRpc(advisor: string, cwd: string, active: boolean): Promise<void> {
   const connection = connectionRef
   if (!connection) throw new Error('no connection')
-  const result = await connection.rpc.call('/dsh-omp-advisor', 'update', {
-    patch: { advisors: next }
+  const result = await connection.rpc.call('/dsh-omp-advisor', 'setAdvisorWorkspace', {
+    advisor,
+    cwd,
+    active
   })
-  unwrapRpcResult<{ settings: unknown }>(result, 'advisor workspace update')
+  unwrapRpcResult<{ settings: unknown }>(result, 'advisor workspace toggle')
+}
+
+async function addWorkspaceAdvisorRpc(entry: WorkspaceAdvisorEntry): Promise<void> {
+  const connection = connectionRef
+  if (!connection) throw new Error('no connection')
+  const result = await connection.rpc.call('/dsh-omp-advisor', 'addWorkspaceAdvisor', { entry })
+  unwrapRpcResult<{ settings: unknown }>(result, 'add workspace advisor')
 }
 
 function loadModelCatalog(): Promise<ModelCatalog | null> {
@@ -334,19 +341,19 @@ function AdvisorsMonitorTab(props: { scopedSessionId?: string }): React.ReactEle
   const advisorsList = configured as WorkspaceAdvisorEntry[]
   const workspaceSplit = workspaceCwd ? splitAdvisorsByWorkspace(advisorsList, workspaceCwd) : null
 
-  const runWrite = (next: WorkspaceAdvisorEntry[], label: string): void => {
+  const runToggle = (promise: Promise<void>, label: string): void => {
     setActionError(null)
-    void writeAdvisors(next)
+    void promise
       .then(() => pollOnce())
       .catch((err: unknown) => setActionError(`${label}: ${String(err instanceof Error ? err.message : err)}`))
   }
   const enableHere = (name: string): void => {
     if (!workspaceCwd || !name) return
-    runWrite(enableAdvisorHere(advisorsList, name, workspaceCwd), `enable "${name}"`)
+    runToggle(setAdvisorWorkspaceRpc(name, workspaceCwd, true), `enable "${name}"`)
   }
   const disableHere = (name: string): void => {
     if (!workspaceCwd || !name) return
-    runWrite(disableAdvisorHere(advisorsList, name, workspaceCwd), `disable "${name}"`)
+    runToggle(setAdvisorWorkspaceRpc(name, workspaceCwd, false), `disable "${name}"`)
   }
   const addAdvisor = (): void => {
     setActionError(null)
@@ -355,13 +362,14 @@ function AdvisorsMonitorTab(props: { scopedSessionId?: string }): React.ReactEle
         const cat = catalog ?? (await loadModelCatalog())
         const firstGroup = cat?.groups.find(group => group.models.length > 0)
         const firstModel = firstGroup?.models[0]
+        // The host re-generates a unique name + sanitizes on append.
         const entry = buildWorkspaceAdvisor({
-          name: uniqueAdvisorName('advisor', advisorsList),
+          name: 'advisor',
           provider: firstGroup?.id ?? '',
           model: firstModel?.id ?? '',
           cwd: workspaceCwd
         })
-        await writeAdvisors([...advisorsList, entry])
+        await addWorkspaceAdvisorRpc(entry)
         pollOnce()
       } catch (err: unknown) {
         setActionError(`add advisor: ${String(err instanceof Error ? err.message : err)}`)
@@ -378,13 +386,13 @@ function AdvisorsMonitorTab(props: { scopedSessionId?: string }): React.ReactEle
         const firstGroup = cat?.groups.find(group => group.models.length > 0)
         const firstModel = firstGroup?.models[0]
         const entry = buildWorkspaceAdvisor({
-          name: uniqueAdvisorName(preset.name, advisorsList),
+          name: preset.name,
           provider: firstGroup?.id ?? '',
           model: firstModel?.id ?? '',
           cwd: workspaceCwd,
           preset
         })
-        await writeAdvisors([...advisorsList, entry])
+        await addWorkspaceAdvisorRpc(entry)
         pollOnce()
       } catch (err: unknown) {
         setActionError(`add "${preset.name}": ${String(err instanceof Error ? err.message : err)}`)
@@ -555,7 +563,9 @@ function AdvisorsMonitorTab(props: { scopedSessionId?: string }): React.ReactEle
                     style={{ width: 8, height: 8, borderRadius: '50%', background: '#8a8a8a', display: 'inline-block' }}
                   />
                   <span style={{ fontWeight: 600 }}>{entry.name || 'unnamed'}</span>
-                  <span style={chip}>{reason === 'off' ? 'off' : 'not in this workspace'}</span>
+                  <span style={chip}>
+                    {reason === 'off' ? 'off' : reason === 'disabled-here' ? 'disabled here' : 'not in this workspace'}
+                  </span>
                   <button style={actionButton} onClick={() => enableHere(entry.name ?? '')}>
                     Enable here
                   </button>

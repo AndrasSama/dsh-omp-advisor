@@ -5,6 +5,12 @@
  */
 import { Service } from '@deepseek-ai/cordis'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import {
+  disableAdvisorHere,
+  enableAdvisorHere,
+  uniqueAdvisorName,
+  type WorkspaceAdvisorEntry
+} from './advisor-workspace'
 import { MemoryManager } from './memory/manager'
 import { registerAdvisorRpc } from './rpc'
 import { createRestorePoint, pruneRestorePoints } from './restore-points'
@@ -16,7 +22,14 @@ import {
   normalizeSettings,
   normalizeSettingsLenient
 } from './settings'
-import type { AdvisorEventEntry, AdvisorSettings, CordisContextLike, SessionAdvisorSnapshot, SessionLike } from './types'
+import type {
+  AdvisorEntry,
+  AdvisorEventEntry,
+  AdvisorSettings,
+  CordisContextLike,
+  SessionAdvisorSnapshot,
+  SessionLike
+} from './types'
 
 export const SERVICE_NAME = 'dsh-omp-advisor'
 
@@ -257,6 +270,77 @@ export class AdvisorService extends Service {
     this.settingsScope.update(patch)
     this.settingsValue = normalizeSettings(this.settingsScope.get())
     return normalizeSettingsLenient(this.settingsScope.get())
+  }
+
+  /**
+   * Atomically toggle one advisor's workspace-scoped state (v0.7.6). The sidebar
+   * calls this instead of read-modify-writing the whole advisors array: it loads
+   * the CURRENT settings (never a stale client cache), applies the pure
+   * enable/disable op for just this advisor, and saves — so a concurrent edit in
+   * the settings dialog is not clobbered. `active=false` appends an exact
+   * `=<cwd>` exclusion to `disabledWorkspaces` (never touching `enabled` or the
+   * authored inclusion patterns); `active=true` clears it, turns the advisor on,
+   * and ensures its inclusion patterns cover the workspace.
+   */
+  setAdvisorWorkspace(advisorName: string, cwd: string, active: boolean): AdvisorSettings {
+    if (typeof advisorName !== 'string' || advisorName.trim() === '') {
+      throw new Error('advisor must be a non-empty string')
+    }
+    if (typeof cwd !== 'string' || cwd.trim() === '') {
+      throw new Error('cwd must be a non-empty string')
+    }
+    const current = normalizeSettings(this.settingsScope.get())
+    if (!current.advisors.some(entry => entry.name === advisorName)) {
+      throw new Error(`no advisor named "${advisorName}"`)
+    }
+    const advisors = active
+      ? enableAdvisorHere(current.advisors, advisorName, cwd)
+      : disableAdvisorHere(current.advisors, advisorName, cwd)
+    return this.updateSettings({ advisors })
+  }
+
+  /**
+   * Atomically append one new advisor (v0.7.6), built by the caller (the sidebar
+   * picks the model from the catalog and expands presets client-side). The host
+   * re-generates a unique name against the CURRENT settings and sanitizes the
+   * entry to known fields, so a concurrent edit is not clobbered and no unknown
+   * keys are persisted.
+   */
+  addWorkspaceAdvisor(rawEntry: unknown): AdvisorSettings {
+    if (typeof rawEntry !== 'object' || rawEntry === null || Array.isArray(rawEntry)) {
+      throw new Error('entry must be an object')
+    }
+    const sent = rawEntry as Partial<AdvisorEntry>
+    if (typeof sent.provider !== 'string' || sent.provider.trim() === '') {
+      throw new Error('entry.provider must be a non-empty string')
+    }
+    if (typeof sent.model !== 'string' || sent.model.trim() === '') {
+      throw new Error('entry.model must be a non-empty string')
+    }
+    const current = normalizeSettings(this.settingsScope.get())
+    const base = typeof sent.name === 'string' && sent.name.trim() !== '' ? sent.name.trim() : 'advisor'
+    const entry: AdvisorEntry = {
+      name: uniqueAdvisorName(base, current.advisors),
+      provider: sent.provider,
+      model: sent.model,
+      maxTurns: 4,
+      enabled: true,
+      ...(Array.isArray(sent.workspaces)
+        ? {
+            workspaces: sent.workspaces
+              .filter((w): w is string => typeof w === 'string' && w.trim() !== '')
+              .map(w => w.trim())
+          }
+        : {}),
+      ...(typeof sent.instructions === 'string' && sent.instructions.trim() !== ''
+        ? { instructions: sent.instructions }
+        : {}),
+      ...(Array.isArray(sent.skills)
+        ? { skills: sent.skills.filter((s): s is string => typeof s === 'string' && s.trim() !== '') }
+        : {}),
+      ...(typeof sent.preset === 'string' && sent.preset !== '' ? { preset: sent.preset } : {})
+    }
+    return this.updateSettings({ advisors: [...current.advisors, entry] })
   }
 
   /**

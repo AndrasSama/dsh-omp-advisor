@@ -60,6 +60,15 @@ export interface AdvisorEntry {
    * Empty/omitted = the advisor runs in every session.
    */
   workspaces?: string[]
+  /**
+   * Workspace exclusions (v0.7.6): patterns matched against the session cwd.
+   * When the cwd matches any pattern here the advisor does NOT run in that
+   * workspace, even if `workspaces` would otherwise include it (or is empty,
+   * i.e. runs everywhere). Powers the sidebar's workspace-scoped "Disable
+   * here": an always-on advisor can be switched off in a single workspace
+   * without touching the global `enabled` switch or its inclusion patterns.
+   */
+  disabledWorkspaces?: string[]
   /** Per-advisor on/off toggle (default true). */
   enabled?: boolean
   /**

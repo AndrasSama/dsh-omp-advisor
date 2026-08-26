@@ -913,10 +913,11 @@ test('advisorMatchesWorkspacePatterns mirrors host semantics (empty = everywhere
   assert.equal(advisorMatchesWorkspacePatterns(['   '], WS), true) // blank-only = everywhere
 })
 
-test('splitAdvisorsByWorkspace classifies active vs off vs not-in-workspace', () => {
+test('splitAdvisorsByWorkspace classifies active vs off vs disabled-here vs not-in-workspace', () => {
   const advisors = [
     { name: 'everywhere', enabled: true }, // empty workspaces -> active
     { name: 'here', enabled: true, workspaces: [`=${WS}`] }, // active
+    { name: 'excluded', enabled: true, disabledWorkspaces: [`=${WS}`] }, // disabled-here
     { name: 'elsewhere', enabled: true, workspaces: ['novels'] }, // not-in-workspace
     { name: 'off-here', enabled: false, workspaces: [`=${WS}`] }, // off
     { name: 'off-all', enabled: false } // off
@@ -926,6 +927,7 @@ test('splitAdvisorsByWorkspace classifies active vs off vs not-in-workspace', ()
   assert.deepEqual(
     inactive.map(item => [item.entry.name, item.reason]),
     [
+      ['excluded', 'disabled-here'],
       ['elsewhere', 'not-in-workspace'],
       ['off-here', 'off'],
       ['off-all', 'off']
@@ -933,17 +935,24 @@ test('splitAdvisorsByWorkspace classifies active vs off vs not-in-workspace', ()
   )
 })
 
-test('enableAdvisorHere re-enables and appends =cwd only when needed, preserving fields', () => {
+test('enableAdvisorHere: turns on, clears exclusion, appends =cwd only when needed, preserves fields', () => {
   const base = [
     { name: 'off-all', enabled: false, provider: 'p', model: 'm', instructions: 'keep me' },
-    { name: 'elsewhere', enabled: true, workspaces: ['novels'], provider: 'p2' },
+    { name: 'excluded', enabled: true, disabledWorkspaces: [`=${WS}`], provider: 'p2' },
+    { name: 'elsewhere', enabled: true, workspaces: ['novels'], provider: 'p3' },
     { name: 'everywhere', enabled: false }
   ]
-  const next = enableAdvisorHere(enableAdvisorHere(enableAdvisorHere(base, 'off-all', WS), 'elsewhere', WS), 'everywhere', WS)
+  let next = enableAdvisorHere(base, 'off-all', WS)
+  next = enableAdvisorHere(next, 'excluded', WS)
+  next = enableAdvisorHere(next, 'elsewhere', WS)
+  next = enableAdvisorHere(next, 'everywhere', WS)
   const offAll = next.find(entry => entry.name === 'off-all')
   assert.equal(offAll.enabled, true)
   assert.equal(offAll.instructions, 'keep me') // untouched fields survive
   assert.equal(offAll.workspaces, undefined) // empty list already matches everywhere -> nothing appended
+  const excluded = next.find(entry => entry.name === 'excluded')
+  assert.equal(excluded.enabled, true)
+  assert.deepEqual(excluded.disabledWorkspaces, []) // exclusion cleared
   const elsewhere = next.find(entry => entry.name === 'elsewhere')
   assert.deepEqual(elsewhere.workspaces, ['novels', `=${WS}`]) // appended exact pattern
   const everywhere = next.find(entry => entry.name === 'everywhere')
@@ -951,20 +960,114 @@ test('enableAdvisorHere re-enables and appends =cwd only when needed, preserving
   assert.equal(everywhere.workspaces, undefined)
 })
 
-test('disableAdvisorHere: empty list -> global off; removes matching; emptied -> global off', () => {
+test('disableAdvisorHere: appends =cwd exclusion, never touches enabled/workspaces, idempotent', () => {
   const advisors = [
-    { name: 'everywhere', enabled: true }, // empty -> global off
-    { name: 'only-here', enabled: true, workspaces: [`=${WS}`] }, // emptied -> global off
-    { name: 'multi', enabled: true, workspaces: [`=${WS}`, 'novels'] } // keep 'novels'
+    { name: 'everywhere', enabled: true }, // always-on -> excluded here, still on elsewhere
+    { name: 'only-here', enabled: true, workspaces: [`=${WS}`] },
+    { name: 'multi', enabled: true, workspaces: [`=${WS}`, 'novels'] }
   ]
-  const next = disableAdvisorHere(advisors, 'everywhere', WS)
-  const next2 = disableAdvisorHere(next, 'only-here', WS)
-  const next3 = disableAdvisorHere(next2, 'multi', WS)
-  assert.equal(next3.find(entry => entry.name === 'everywhere').enabled, false)
-  assert.equal(next3.find(entry => entry.name === 'only-here').enabled, false)
-  const multi = next3.find(entry => entry.name === 'multi')
-  assert.equal(multi.enabled, true)
-  assert.deepEqual(multi.workspaces, ['novels'])
+  let next = disableAdvisorHere(advisors, 'everywhere', WS)
+  next = disableAdvisorHere(next, 'only-here', WS)
+  next = disableAdvisorHere(next, 'multi', WS)
+  const everywhere = next.find(entry => entry.name === 'everywhere')
+  assert.equal(everywhere.enabled, true) // global switch untouched
+  assert.equal(everywhere.workspaces, undefined) // inclusion untouched
+  assert.deepEqual(everywhere.disabledWorkspaces, [`=${WS}`]) // excluded here only
+  const onlyHere = next.find(entry => entry.name === 'only-here')
+  assert.equal(onlyHere.enabled, true)
+  assert.deepEqual(onlyHere.workspaces, [`=${WS}`]) // authored pattern preserved
+  assert.deepEqual(onlyHere.disabledWorkspaces, [`=${WS}`])
+  const multi = next.find(entry => entry.name === 'multi')
+  assert.deepEqual(multi.workspaces, [`=${WS}`, 'novels']) // nothing deleted
+  assert.deepEqual(multi.disabledWorkspaces, [`=${WS}`])
+  // Idempotent: disabling again does not duplicate the exclusion.
+  const again = disableAdvisorHere(next, 'everywhere', WS)
+  assert.deepEqual(again.find(entry => entry.name === 'everywhere').disabledWorkspaces, [`=${WS}`])
+})
+
+test('host advisorMatchesWorkspace honors disabledWorkspaces (exclusion wins)', () => {
+  // Always-on advisor excluded from this workspace -> does not match here...
+  assert.equal(advisorMatchesWorkspace({ disabledWorkspaces: [`=${WS}`] }, WS), false)
+  // ...but still matches every other workspace.
+  assert.equal(advisorMatchesWorkspace({ disabledWorkspaces: [`=${WS}`] }, '/home/sama/other'), true)
+  // Exclusion overrides an inclusion pattern that would otherwise match.
+  assert.equal(
+    advisorMatchesWorkspace({ workspaces: ['Qwest'], disabledWorkspaces: [`=${WS}`] }, WS),
+    false
+  )
+  // Substring exclusion also bars matching workspaces.
+  assert.equal(advisorMatchesWorkspace({ disabledWorkspaces: ['Qwest'] }, WS), false)
+  // No exclusion -> normal inclusion rules.
+  assert.equal(advisorMatchesWorkspace({ workspaces: ['Qwest'] }, WS), true)
+})
+
+test('roundtrip: disableAdvisorHere survives both normalizers and stops host matching', () => {
+  const raw = {
+    enabled: true,
+    advisors: [{ name: 'a', provider: 'p', model: 'm', maxTurns: 4, enabled: true }]
+  }
+  const disabled = disableAdvisorHere(raw.advisors, 'a', WS)
+  // Strict normalizer (host attach path) retains the exclusion...
+  const strict = normalizeSettings({ ...raw, advisors: disabled })
+  assert.deepEqual(strict.advisors[0].disabledWorkspaces, [`=${WS}`])
+  assert.equal(advisorMatchesWorkspace(strict.advisors[0], WS), false)
+  assert.equal(advisorMatchesWorkspace(strict.advisors[0], '/elsewhere'), true)
+  // ...and the lenient normalizer (snapshot path) retains it too.
+  const lenient = normalizeSettingsLenient({ ...raw, advisors: disabled })
+  assert.deepEqual(lenient.advisors[0].disabledWorkspaces, [`=${WS}`])
+})
+
+test('service: setAdvisorWorkspace disable-here stops attachment in that cwd only', () => {
+  const raw = {
+    ...serviceBaseRaw,
+    advisors: [{ name: 'sentinel', provider: 'p', model: 'm', maxTurns: 2, enabled: true }]
+  }
+  const ctx = mockHostCtx({ raw, llm: scriptedLlm([]), agents: new Map() })
+  const service = new AdvisorService(ctx, {})
+  // The always-on advisor initially attaches to this workspace.
+  assert.equal(advisorMatchesWorkspace(service['settingsValue'].advisors[0], WS), true)
+  // Disable it here (atomic host-side load-modify-save).
+  service.setAdvisorWorkspace('sentinel', WS, false)
+  const after = service['settingsValue'].advisors[0]
+  assert.equal(after.enabled, true) // global switch untouched
+  assert.deepEqual(after.disabledWorkspaces, [`=${WS}`])
+  assert.equal(advisorMatchesWorkspace(after, WS), false) // stops attaching here
+  assert.equal(advisorMatchesWorkspace(after, '/home/sama/other'), true) // still elsewhere
+  // The snapshot (lenient view) carries the exclusion too.
+  assert.deepEqual(service.settingsView.advisors[0].disabledWorkspaces, [`=${WS}`])
+  // Enable-here restores attachment.
+  service.setAdvisorWorkspace('sentinel', WS, true)
+  const restored = service['settingsValue'].advisors[0]
+  assert.equal(advisorMatchesWorkspace(restored, WS), true)
+})
+
+test('service: addWorkspaceAdvisor appends a sanitized, uniquely-named, scoped advisor', () => {
+  const raw = {
+    ...serviceBaseRaw,
+    advisors: [{ name: 'advisor', provider: 'p', model: 'm', maxTurns: 2, enabled: true }]
+  }
+  const ctx = mockHostCtx({ raw, llm: scriptedLlm([]), agents: new Map() })
+  const service = new AdvisorService(ctx, {})
+  const view = service.addWorkspaceAdvisor({
+    name: 'advisor', // collides -> host must re-name
+    provider: 'p2',
+    model: 'm2',
+    workspaces: [`=${WS}`],
+    instructions: 'watch this',
+    skills: ['a'],
+    preset: 'x',
+    bogusKey: 'dropped' // unknown keys are not persisted
+  })
+  const added = view.advisors.find(entry => entry.provider === 'p2')
+  assert.ok(added, 'the new advisor is appended')
+  assert.equal(added.name, 'advisor 2') // unique name re-generated host-side
+  assert.deepEqual(added.workspaces, [`=${WS}`])
+  assert.equal(added.instructions, 'watch this')
+  assert.deepEqual(added.skills, ['a'])
+  assert.equal(added.preset, 'x')
+  assert.equal('bogusKey' in added, false)
+  // Missing provider/model is rejected.
+  assert.throws(() => service.addWorkspaceAdvisor({ name: 'x', model: 'm' }), /provider/)
 })
 
 test('buildWorkspaceAdvisor: blank vs preset, scoped to the workspace', () => {

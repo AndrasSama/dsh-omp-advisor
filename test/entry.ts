@@ -8,6 +8,7 @@ export { normalizeSettings, normalizeSettingsLenient, advisorMatchesWorkspace } 
 export {
   workspacePatternMatches,
   advisorMatchesWorkspacePatterns,
+  advisorDisabledInWorkspace,
   advisorActiveInWorkspace,
   splitAdvisorsByWorkspace,
   enableAdvisorHere,
