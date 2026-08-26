@@ -24,6 +24,39 @@ const PENDING_FILE_NAME = 'pending-memory.json'
 /** Pending writes kept across all workspaces (monitor shows the union). */
 const PENDING_LIMIT = 100
 
+/** Concise title for a stored lesson (backends that take a `title` field). */
+function lessonTitle(lesson: { text: string; advisor: string }): string {
+  const firstLine = (lesson.text.split('\n').find(line => line.trim() !== '') ?? '').trim()
+  const snippet = firstLine.length > 80 ? `${firstLine.slice(0, 77)}...` : firstLine
+  return snippet || `${lesson.advisor} lesson`
+}
+
+/**
+ * Build the store-tool argument shape for an engine. Each memory backend has
+ * its own schema, so a single generic payload fails validation:
+ *  - OpenViking `remember` wants `{ messages: [{ role, content }] }`
+ *  - Hindsight `hindsight_ingest_document` wants `{ title, content }`
+ *  - mem0 `add` wants `{ messages: [{ role, content }] }`
+ * Unknown/custom engines get a broad best-effort payload. Matched primarily on
+ * the store tool name (the schema determinant), with the engine id as a hint.
+ */
+export function buildStoreArgs(
+  engine: MemoryEngineConfig,
+  lesson: { text: string; advisor: string; tags: string[] }
+): Record<string, unknown> {
+  const tool = engine.tools?.store ?? ''
+  if (tool === 'remember' || engine.id === 'openviking') {
+    return { messages: [{ role: 'user', content: lesson.text }] }
+  }
+  if (tool === 'hindsight_ingest_document' || tool === 'ingest_document' || engine.id === 'hindsight') {
+    return { title: lessonTitle(lesson), content: lesson.text }
+  }
+  if (tool === 'add' || engine.id === 'mem0') {
+    return { messages: [{ role: 'user', content: lesson.text }] }
+  }
+  return { content: lesson.text, text: lesson.text, title: lessonTitle(lesson), tags: lesson.tags }
+}
+
 interface EngineProbe {
   available: boolean
   detail?: string
@@ -293,7 +326,7 @@ export class MemoryManager {
           continue
         }
         const session = await getMcpSession(engine)
-        await session.call(tool, { content: lesson.text, text: lesson.text, tags: lesson.tags }, ENGINE_RECALL_TIMEOUT_MS)
+        await session.call(tool, buildStoreArgs(engine, lesson), ENGINE_RECALL_TIMEOUT_MS)
         stored.push(engine.id)
       } catch (error) {
         failed.push(`${engine.id} (${String(error instanceof Error ? error.message : error).slice(0, 80)})`)

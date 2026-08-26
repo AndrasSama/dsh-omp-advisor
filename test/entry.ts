@@ -40,7 +40,7 @@ export {
   renderLessonEntry,
   tokenize
 } from '../src/memory/md-store'
-export { MemoryManager } from '../src/memory/manager'
+export { MemoryManager, buildStoreArgs } from '../src/memory/manager'
 export {
   probeGit,
   clearProbeCache,

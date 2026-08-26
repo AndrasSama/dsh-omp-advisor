@@ -56,7 +56,8 @@ import {
   renderLessonEntry,
   tokenize,
   extractMemoryLesson,
-  MemoryManager
+  MemoryManager,
+  buildStoreArgs
 } from './.bundle.mjs'
 
 /* -------------------------------- AdviseGate -------------------------------- */
@@ -2662,6 +2663,27 @@ test('MemoryManager.parseMcpRecallText handles arrays, wrapped lists, and raw te
 test('MemoryManager: recall returns empty when memory disabled or no engines usable', async () => {
   const manager = new MemoryManager(memoryManagerHost().host, normalizeMemorySettings({ enabled: false }))
   assert.equal(await manager.recall({ cwd: '/tmp', engineIds: undefined, query: 'anything' }), '')
+})
+
+test('buildStoreArgs: per-engine schema shapes (openviking messages, hindsight title+content)', () => {
+  const lesson = { text: 'Prefer composition over inheritance here.', advisor: 'The Clarifier', tags: ['style'] }
+  // OpenViking `remember` wants { messages: [{ role, content }] }.
+  const ov = buildStoreArgs({ id: 'openviking', tools: { store: 'remember' } }, lesson)
+  assert.deepEqual(ov, { messages: [{ role: 'user', content: lesson.text }] })
+  // Hindsight `hindsight_ingest_document` wants { title, content }.
+  const hs = buildStoreArgs({ id: 'hindsight', tools: { store: 'hindsight_ingest_document' } }, lesson)
+  assert.equal(hs.content, lesson.text)
+  assert.equal(typeof hs.title, 'string')
+  assert.ok(hs.title.length > 0 && hs.title.length <= 80)
+  assert.equal('messages' in hs, false)
+  // mem0 `add` uses the messages shape too.
+  const mem0 = buildStoreArgs({ id: 'mem0', tools: { store: 'add' } }, lesson)
+  assert.deepEqual(mem0, { messages: [{ role: 'user', content: lesson.text }] })
+  // Unknown/custom engines get a broad best-effort payload.
+  const custom = buildStoreArgs({ id: 'custom', tools: { store: 'save_thing' } }, lesson)
+  assert.equal(custom.content, lesson.text)
+  assert.equal(custom.text, lesson.text)
+  assert.deepEqual(custom.tags, ['style'])
 })
 
 /* --------------------- v0.7.2 preset migration + resolver ------------------- */
