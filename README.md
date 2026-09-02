@@ -107,9 +107,10 @@ primary agent ──► session log ──► delta renderer ──► advisor m
 
 **Prerequisites**
 
-- DeepSeek Harness `0.1.0-rc.8` or newer with the **web profile** (`dsh web`).
+- DeepSeek Harness **0.1.2-alpha.4 or newer** (the alpha line) with the **web profile** (`dsh web`). v0.8.0 dropped rc.8 support: it relies on the alpha-4 two-argument `connection.rpc.handle` (the rc.8 third `authority` options argument is no longer passed). The rest of the consumed surface was verified unchanged in 0.1.2-alpha.4: `Service(ctx, name)` (cordis 4.0.2), `createUserMessage` + the `plugin` source kind, `llm.stream`, `agents.get`, `settings.register`, the session/turn/fs event names, the `settings.section` slot, the `__ModuleLoader__` client wrapper, and the `dsh.bundle.patch` / `dsh.client` package.json manifest shape.
 - At least one model configured in DSH's model list — each advisor needs a provider route + model picked from that list.
 - The plugin is inert until enabled: the master switch (**Attach advisors to sessions**) is **off by default**.
+- Optional: for the sidebar Advisors tab, [dsh-better-sidebar](https://github.com/omdsh-dev/DSH-better-sidebar) **0.18.0-alpha.0** (the alpha-line release; 0.17.x targets the old rc line).
 
 **Install**
 
@@ -126,7 +127,7 @@ Then **restart DSH Web** and **hard-refresh the browser** (Ctrl+Shift+R). The re
 
 1. Open **Settings** in the DSH Web GUI — a **Ward Council** section must be present.
 2. Its **Live status** panel lists sessions with attached advisors once the master switch is on.
-3. First run: enable the master switch, click **Add from preset** (or **+ Add advisor**), pick a model from the dropdown, and start any session — the advisor chip appears in Live status within one turn.
+3. First run: enable the master switch, click **Add advisor ▾** and pick a preset, choose a model from the dropdown, and start any session — the advisor chip appears in Live status within one turn.
 
 **Upgrade / uninstall**
 
@@ -148,7 +149,7 @@ Install the dsh-omp-advisor plugin into the DSH web profile.
 
 Context:
 - DSH CLI: `dsh` (must be on PATH; often ~/.npm-global/bin/dsh). Version must be
-  0.1.0-rc.8+. The web profile directory is ~/.dsh/profiles/web (pnpm-managed).
+  0.1.2-alpha.4+ (the alpha line). The web profile directory is ~/.dsh/profiles/web (pnpm-managed).
 - `dsh plugin --profile web <cmd>` delegates to pnpm inside that profile dir.
 - A `dsh web` server may currently be RUNNING and hosting live user sessions.
   NEVER kill it yourself unless the user explicitly says they will restart it;

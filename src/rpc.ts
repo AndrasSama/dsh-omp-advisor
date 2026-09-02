@@ -13,12 +13,11 @@
  *   memoryApprove {writeId}           -> approve one pending memory write
  *   memoryDiscard {writeId}           -> discard one pending memory write
  *
- * Contract notes (dsh-client-connection, rc.8):
- *  - `rpc.handle` REQUIRES the options argument; `authority` is read
- *    unguarded, so omitting it crashes the plugin tree at boot.
- *  - `authority: 'trusted-host'` accepts loopback plus the deployment's
- *    `--trusted-host` authorities (same fence as `/api`), so the settings
- *    section works from remote GUIs too. `'loopback'` would 403 them.
+ * Contract notes (dsh-client-connection, verified against 0.1.2-alpha.4):
+ *  - `rpc.handle(channel, handler)` is two-argument; the rc.8 third options
+ *    argument (`authority: 'trusted-host'`) was removed — trust and
+ *    authentication are applied by the physical carrier before dispatch, so
+ *    remote GUIs can still reach this channel.
  *  - Handlers return an RpcResult (`{ok:true,value}` / `{ok:false,error}`)
  *    and never throw: a thrown error becomes an opaque HTTP 500.
  *
@@ -154,7 +153,6 @@ export function registerAdvisorRpc(ctx: CordisContextLike, service: AdvisorServi
       } catch (error) {
         return internal(String(error instanceof Error ? error.message : error))
       }
-    },
-    { authority: 'trusted-host' }
+    }
   )
 }

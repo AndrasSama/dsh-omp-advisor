@@ -520,12 +520,12 @@ function captureHandle() {
   return { ctx, captured }
 }
 
-test('rpc registration passes the required authority option', () => {
+test('rpc registration uses the two-argument handle contract (alpha-4)', () => {
   const { ctx, captured } = captureHandle()
   registerAdvisorRpc(ctx, stubService())
   assert.equal(captured.channel, RPC_CHANNEL)
-  assert.ok(captured.options, 'options argument is required by dsh-client-connection')
-  assert.equal(captured.options.authority, 'trusted-host')
+  assert.equal(captured.handler.length, 3, 'handler takes (endpoint, payload, signal)')
+  assert.equal(captured.options, undefined, 'the rc.8 authority options argument is gone in 0.1.2-alpha.4')
 })
 
 test('rpc snapshot returns an RpcResult value, not a raw object', async () => {
