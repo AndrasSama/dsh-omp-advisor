@@ -8,6 +8,9 @@ import { test } from 'node:test'
 import {
   AdviseGate,
   projectCatalogForModelSeat,
+  firstUserBlock,
+  renderRecoveredOriginalAsk,
+  ORIGINAL_ASK_LIMIT,
   AdvisorLoop,
   AdvisorOutputQuarantinedError,
   AdvisorService,
@@ -60,6 +63,127 @@ import {
   MemoryManager,
   buildStoreArgs
 } from './.bundle.mjs'
+
+/* --------------------- W3: what survives a context reset -------------------- */
+
+test('a context reset keeps the delivered-note memory', () => {
+  // The regression W3 names: deliveredRanks records what the USER has been told,
+  // and dropping the transcript does not un-tell them. Clearing it let the
+  // advisor repeat itself at the same severity right after a forced reset.
+  const delivered = []
+  const gate = new AdviseGate((note, severity) => {
+    delivered.push({ note, severity })
+    return { gated: false, maxDenials: 2 }
+  })
+
+  assert.equal(gate.advise('add error handling', 'concern').delivered, true)
+  gate.resetTurnState()
+  const again = gate.advise('add error handling', 'concern')
+  assert.equal(again.delivered, false, 'the same note at the same severity must stay suppressed')
+  assert.equal(again.modelReply, 'Duplicate advice ignored.')
+  assert.equal(delivered.length, 1)
+})
+
+test('escalation still gets through after a context reset', () => {
+  // Preserving the memory must not wedge the advisor: dedupe suppresses only the
+  // same or a LOWER severity, so a still-open issue can be re-raised harder.
+  const delivered = []
+  const gate = new AdviseGate(note => {
+    delivered.push(note)
+    return { gated: false, maxDenials: 2 }
+  })
+  gate.advise('tests are not run', 'concern')
+  gate.resetTurnState()
+  assert.equal(gate.advise('tests are not run', 'blocker').delivered, true)
+  assert.equal(delivered.length, 2)
+})
+
+test('a context reset still drops the in-flight turn deferral', () => {
+  // Deferral IS turn-scoped: those notes were withheld for a primary turn that
+  // the reset abandoned, so flushing them afterwards would deliver stale advice.
+  const delivered = []
+  const gate = new AdviseGate(note => {
+    delivered.push(note)
+    return { gated: false, maxDenials: 2 }
+  })
+  gate.beginUpdate(true)
+  gate.advise('rename this variable', 'nit')
+  assert.equal(gate.deferredCount, 1)
+  gate.resetTurnState()
+  assert.equal(gate.deferredCount, 0)
+  gate.beginUpdate(false)
+  assert.equal(delivered.length, 0, 'the abandoned turn must not flush its backlog')
+})
+
+test('firstUserBlock recovers the ask from a rendered delta', () => {
+  const delta = '## Update 1\n\n### User\nPlease add a retry to the uploader\n\n### Assistant\nOn it.'
+  assert.equal(firstUserBlock(delta), 'Please add a retry to the uploader')
+})
+
+test('firstUserBlock ignores deltas with no user text', () => {
+  // Returning undefined (rather than '') lets the loop keep looking at later
+  // deltas instead of pinning an empty anchor as the session's ask.
+  assert.equal(firstUserBlock('## Update 2\n\n### Assistant\njust working'), undefined)
+  assert.equal(firstUserBlock('### User\n   \n### Assistant\nhi'), undefined)
+})
+
+test('renderRecoveredOriginalAsk names the ask and warns history is not work', () => {
+  const block = renderRecoveredOriginalAsk('Ship the CSV export')
+  assert.match(block, /<recovered-original-ask>/)
+  assert.match(block, /Ship the CSV export/)
+  // An advisor that reads an empty transcript as "nothing was done" would invert
+  // the failure, so the block must say the gap is history, not work.
+  assert.match(block, /Missing history is NOT evidence that nothing was done/)
+})
+
+test('renderRecoveredOriginalAsk bounds a runaway ask but keeps its head', () => {
+  const huge = `START${'x'.repeat(ORIGINAL_ASK_LIMIT * 2)}END`
+  const block = renderRecoveredOriginalAsk(huge)
+  assert.match(block, /START/)
+  assert.doesNotMatch(block, /END/)
+  assert.match(block, /\u2026\[truncated \d+ chars\]/)
+})
+
+test('the completion-gate prompt points at the tag the renderer emits', () => {
+  // A cross-file contract: renderRecoveredOriginalAsk emits a tag, and the gate
+  // prompt has to name it or the advisor will follow "recover the ask from the
+  // transcript" literally, find nothing, and judge completion against whatever
+  // delta happens to be in flight. These two files can only drift silently.
+  const tag = /<(recovered-original-ask)>/.exec(renderRecoveredOriginalAsk('anything'))?.[1]
+  assert.equal(tag, 'recovered-original-ask')
+  const prompt = readFileSync(new URL('../src/prompts/completion-gate.md', import.meta.url), 'utf8')
+  assert.match(prompt, /<recovered-original-ask>/)
+})
+
+/* ------------------------- the reset, end to end ---------------------------- */
+
+test('after a context reset the advisor is re-told the original ask', async () => {
+  // The completion gate's step 1 is "recover the original ask from the
+  // transcript". Before this fix a context reset wiped the transcript and the
+  // gate silently degraded to judging completion against whatever delta happened
+  // to be in flight. Drive the REAL budget, not a mock of it.
+  const ask = 'Please make the importer skip malformed rows'
+  const llm = mockLlm([
+    [{ type: 'text', text: 'noted' }],
+    [{ type: 'text', text: 'noted' }]
+  ])
+  const loop = new AdvisorLoop({ llm, cwd: process.cwd(), onAdvice: () => {} }, baseEntry)
+
+  // One oversized delta that both carries the ask and blows the budget.
+  // Assert on the block's own wording, NOT on the tag: the completion-gate prompt
+  // also names the tag, so matching it would pass even with no block injected.
+  const marker = /Your earlier transcript was dropped/
+  const huge = `### User\n${ask}\n### Assistant\n${'x'.repeat(400_001)}`
+  await loop.review(huge, { inProgress: false, signal: new AbortController().signal })
+  assert.doesNotMatch(llm.calls[0].system, marker)
+  assert.equal(llm.calls[0].system.includes(ask), false)
+
+  // The next review trips maybeResetForContext BEFORE its own delta is pushed.
+  await loop.review('### Assistant\nwrapping up', { inProgress: false, signal: new AbortController().signal })
+  const afterReset = llm.calls[1].system
+  assert.match(afterReset, marker)
+  assert.match(afterReset, /Please make the importer skip malformed rows/)
+})
 
 /* ---------------------------- seat stacking layer --------------------------- */
 

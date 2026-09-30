@@ -17,7 +17,7 @@ export {
   uniqueAdvisorName
 } from '../src/advisor-workspace'
 export { AdvisorLoop } from '../src/advisor-loop'
-export { extractMemoryLesson } from '../src/advisor-loop'
+export { extractMemoryLesson, firstUserBlock, renderRecoveredOriginalAsk, ORIGINAL_ASK_LIMIT } from '../src/advisor-loop'
 export { SessionAdvisorRuntime } from '../src/runtime'
 export { AdvisorService } from '../src/service'
 export { registerAdvisorRpc, RPC_CHANNEL } from '../src/rpc'

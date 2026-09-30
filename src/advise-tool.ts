@@ -94,9 +94,19 @@ export class AdviseGate {
     }
   }
 
-  /** Clear delivered-note memory when the advisor starts a fresh conversation. */
-  resetDeliveredNotes(): void {
-    this.deliveredRanks.clear()
+  /**
+   * Clear the state that belongs to the in-flight primary turn.
+   *
+   * `deliveredRanks` is deliberately KEPT. It is not review context: it records
+   * what the user has already been TOLD, and dropping the transcript does not
+   * un-tell them. Clearing it on a context reset let the advisor re-deliver a
+   * note it had already delivered at the same severity — repetition that lands
+   * precisely when a long session has just been forced to start over.
+   *
+   * Escalation still gets through after a reset: dedupe suppresses only the same
+   * or a lower severity, so a still-open issue can be re-raised at a higher one.
+   */
+  resetTurnState(): void {
     this.inProgressUpdate = false
     this.deferredNotes = []
   }

@@ -157,11 +157,64 @@ async function collectStream(stream: AsyncIterable<LlmStreamChunk>): Promise<{
   return { blocks, finishKind, failure }
 }
 
+/** How much of the recovered original ask is carried across a reset. */
+export const ORIGINAL_ASK_LIMIT = 1200
+
+/**
+ * Pull the session's original request out of a rendered delta.
+ *
+ * Deltas render the watched conversation as `### User` / `### Assistant`
+ * sections (see `delta.ts`), so the first user block the advisor ever sees IS
+ * the original ask — the same thing the completion gate would have recovered
+ * from the transcript. Returns undefined when this delta carries no user text,
+ * so the caller can keep looking at later deltas rather than recording a
+ * spurious anchor.
+ */
+export function firstUserBlock(delta: string): string | undefined {
+  const match = /^### User[^\n]*\n([\s\S]*?)(?=\n### |$)/m.exec(delta)
+  const text = match?.[1]?.trim()
+  return text ? text : undefined
+}
+
+/**
+ * Render the ask recovered before a context reset.
+ *
+ * The completion gate's first step is "recover the original ask from the
+ * transcript"; after a reset that transcript is gone, so without this the gate
+ * silently degrades to judging completion against whatever delta happens to be
+ * in flight. The wording says plainly that the gap is missing HISTORY and not
+ * missing WORK — an advisor that reads an empty transcript as "nothing has been
+ * done yet" would produce the opposite failure.
+ */
+export function renderRecoveredOriginalAsk(ask: string): string {
+  const bounded =
+    ask.length > ORIGINAL_ASK_LIMIT
+      ? `${ask.slice(0, ORIGINAL_ASK_LIMIT)} \u2026[truncated ${ask.length - ORIGINAL_ASK_LIMIT} chars]`
+      : ask
+  return [
+    '<recovered-original-ask>',
+    "Your earlier transcript was dropped to fit the model's context window, so you cannot see the work that followed this request. The session's original request was:",
+    '',
+    bounded,
+    '',
+    'Judge completion against this request and against the workspace — not against your memory of the intervening work. Missing history is NOT evidence that nothing was done.',
+    '</recovered-original-ask>'
+  ].join('\n')
+}
+
 export class AdvisorLoop {
   private messages: LoopMessage[] = []
   private contextFilesLoaded = false
   private contextFilesText = ''
   private charSize = 0
+  /**
+   * The session's original request, captured from the first user block seen.
+   * Kept across a context reset because it is the one piece of the dropped
+   * transcript the completion gate cannot re-derive from live deltas.
+   */
+  private originalAsk: string | undefined
+  /** True once a reset has discarded history that the advisor can no longer see. */
+  private droppedHistory = false
   readonly gate: AdviseGate
 
   constructor(
@@ -187,12 +240,27 @@ export class AdvisorLoop {
     Object.assign(this.host, flags)
   }
 
-  /** Drop the advisor's conversation (context loss / settings rebuild). The session cursor is owned by the runtime and stays. */
+  /**
+   * Drop the advisor's conversation (context loss / settings rebuild). The session
+   * cursor is owned by the runtime and stays.
+   *
+   * This discards exactly one thing — the accumulated review transcript — and
+   * deliberately keeps two that a reset used to destroy alongside it:
+   *
+   *   - the delivered-note memory, because it records what the user has ALREADY
+   *     been told (see `AdviseGate.resetTurnState`);
+   *   - the original ask, because the completion gate verifies against it and no
+   *     live delta can reconstruct it once the transcript is gone.
+   *
+   * So the reset stays cheap: it shrinks context without losing the advisor's
+   * account of the user's intent or of its own past advice.
+   */
   resetConversation(): void {
+    if (this.messages.length > 0) this.droppedHistory = true
     this.messages = []
     this.charSize = 0
     this.contextFilesLoaded = false
-    this.gate.resetDeliveredNotes()
+    this.gate.resetTurnState()
   }
 
   private skillsText(): string {
@@ -221,6 +289,12 @@ export class AdvisorLoop {
     if (this.contextFilesText) parts.push(this.contextFilesText)
     parts.push(`Tool reference for \`advise\`:\n${adviseToolPrompt.trim()}`)
     if (this.host.completionGate !== false) parts.push(completionGatePrompt.trim())
+    // Not gated on `completionGate`: the ask is the session's intent, so every
+    // review benefits from it, and it is the gate's required input when the gate
+    // is on. It appears only after a reset has actually dropped history, and is
+    // bounded by ORIGINAL_ASK_LIMIT, so the unconditional cost is one bounded
+    // block on the turns that lost their transcript.
+    if (this.droppedHistory && this.originalAsk) parts.push(renderRecoveredOriginalAsk(this.originalAsk))
     if (this.host.memoryEnabled === true) parts.push(memoryPrompt.trim())
     if (this.entry.instructions?.trim()) {
       parts.push(`<specialization>\n${this.entry.instructions.trim()}\n</specialization>`)
@@ -263,6 +337,10 @@ export class AdvisorLoop {
     this.gate.beginUpdate(opts.inProgress)
 
     const fullDelta = opts.memoryContext ? `${deltaText}\n\n${opts.memoryContext}` : deltaText
+    if (this.originalAsk === undefined) {
+      const ask = firstUserBlock(fullDelta)
+      if (ask) this.originalAsk = ask
+    }
     this.messages.push(userMessage(fullDelta))
     this.trackSize(fullDelta)
 

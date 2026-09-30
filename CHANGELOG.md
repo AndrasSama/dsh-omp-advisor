@@ -6,6 +6,51 @@ v0.9.0; earlier releases are described in the git log and the README.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.0] — 2026-09-30
+
+A context reset used to cost the advisor more than its context. `resetConversation()`
+cleared four kinds of state that have four different lifetimes, and two of them were
+not the reset's business.
+
+### Fixed
+
+- **The advisor no longer repeats advice it has already given.** `deliveredRanks`
+  records what the *user has been told*, not what the advisor is currently reviewing.
+  Dropping the transcript does not un-tell them, but a reset cleared it anyway, so
+  after any forced reset the advisor could re-deliver a note it had already delivered
+  at the same severity. The repetition landed precisely when a long session had just
+  been forced to start over — exactly when the user is least tolerant of it.
+
+  Escalation is unaffected: dedupe suppresses only the same or a *lower* severity, so
+  a still-open issue can be re-raised harder after a reset.
+
+- **The completion gate can still find the original ask.** Its first step is "recover
+  the original ask from the transcript" — the one thing a reset necessarily destroys.
+  The gate then silently degraded to judging completion against whatever delta happened
+  to be in flight, which is how a long session could be told its work was finished.
+
+  The loop now captures the session's first `### User` block while it is still visible
+  and, once a reset has actually dropped history, carries it into the system prompt as
+  a bounded `<recovered-original-ask>` block (1200 chars, head-kept). The block says
+  plainly that the gap is missing *history*, not missing *work*: an advisor that reads
+  an empty transcript as "nothing has been done yet" would invert the failure. The gate
+  prompt now names the block, so the two cannot drift apart.
+
+### Changed
+
+- `AdviseGate.resetDeliveredNotes()` is replaced by `resetTurnState()`, which clears
+  only what belongs to the in-flight primary turn (the deferral queue and the
+  in-progress flag). Deferral genuinely *is* turn-scoped: those notes were withheld for
+  a turn the reset abandoned, so flushing them afterwards would deliver stale advice.
+
+### Notes
+
+- All four reset paths (settings change, context overflow, backlog drop, manual resume)
+  route through this one method, so the fix covers each of them.
+- Verified by mutation: clearing the delivered-note memory again, failing to clear the
+  deferral, dropping the injection, dropping the loss flag, dropping the capture, and
+  unbinding the truncation each fail their own test. 180 tests total.
+
 ## [0.10.1] — 2026-09-30
 
 ### Fixed
