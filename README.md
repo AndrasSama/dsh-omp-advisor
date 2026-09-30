@@ -39,11 +39,12 @@ primary agent ──► session log ──► delta renderer ──► advisor m
 - **Completion gate** — before the agent claims *"done"*, an advisor verifies the original ask is actually implemented and demands an honest report otherwise.
 - **Resilience** — auto-retry for failed reviews and turns, quota cooldowns, output quarantine; an advisor never blocks your agent.
 - **25 personas, 250 skills** — one-click presets from security auditor to web-novel architect, each with curated domain skills.
+- **Searchable model selector** — the composer's model seat becomes a type-to-filter search box (name / id / provider / description), with the reasoning-effort chips preserved in the panel footer. Absorbed from the standalone `dsh-model-search` plugin.
 - **Multi-tab settings + live monitor** — General / Advisors / Workspaces / Memory / Monitor, plus an optional workspace-scoped sidebar tab.
 
 ## Contents
 
-- [How it works](#how-it-works) — review loop · advice & delivery · tool-call gate · resilience · intervention · restore points · completion gate · memory · UI
+- [How it works](#how-it-works) — review loop · advice & delivery · tool-call gate · resilience · intervention · restore points · completion gate · memory · composer model selector · UI
 - [Install](#install) · [Configure](#configure) · [Presets](#presets) · [Skills](#skills)
 - [Safety model](#safety-model) · [Development](#development) · [Attribution & license](#attribution--license) · [Known limitations](#known-limitations)
 
@@ -108,6 +109,29 @@ primary agent ──► session log ──► delta renderer ──► advisor m
 ### Advisor memory
 
 - **Advisor memory (v0.7.0).** Advisors recall relevant long-term lessons into each review and write durable lessons back, through a pluggable engine roster: a built-in per-workspace plaintext store (default), OpenViking, Hindsight, MisakaNet, mem0, and any custom MCP memory server. Multiple engines run at once, each advisor picks its own, unavailable engines are grayed out and never block a review, and a write gate (approval / auto / read-only) controls what gets stored. Full controls live in the [Memory tab](#configure).
+
+### Composer model selector
+
+- **Type to filter, instead of scanning.** The composer's model seat is a
+  single-winner slot (`conversation.input.model`). This plugin registers a searchable
+  variant for it, so the seat becomes a search box over the **same per-session model
+  directory** the stock selector and the `/model` popup read — a choice made in either
+  place stays in sync, and nothing else about model selection changes.
+- **Search & keys.** Case-insensitive substring match on name, id, provider or
+  description, with provider headers preserved in the results. `↑`/`↓` move, `Enter`
+  picks, `Esc` closes, and the active row is kept scrolled into view.
+- **Effort chips kept.** The footer of the open panel carries the current model's
+  reasoning-effort chips (including *Provider default*), so shadowing the stock seat
+  does not cost you the effort control.
+- **Failures stay visible.** A failed catalog load shows the directory's own error text
+  with a Retry; a partially failed load reports the provider count.
+- **Subagent sessions stay inert.** The seat renders disabled where a session may not
+  use Agent-bound model RPCs, exactly like the stock seat.
+- **Optional by construction.** This is a `try`/`catch`-guarded contribution inside the
+  client entry, it needs only the host page's `react`/`react-dom`, and it declares no
+  extra `dsh.client.inject` package — so if anything about it is unavailable the
+  settings section still loads and the stock seat simply renders instead. It lives in
+  `src/client/model-select.ts`, vendored from `dsh-model-search` v0.1.0.
 
 ### Settings UI & monitoring
 

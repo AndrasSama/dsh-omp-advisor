@@ -7,6 +7,7 @@
  */
 import { createSettingsSection } from './SettingsSection'
 import { mountAdvisorSidebarTab } from './sidebar'
+import { applyModelSeat } from './model-select'
 
 export const name = 'dsh-omp-advisor'
 
@@ -50,4 +51,16 @@ export function apply(ctx: any): void {
 
   // Optional dsh-better-sidebar monitor tab (runtime probe, never a hard dep).
   mountAdvisorSidebarTab(ctx)
+
+  // Searchable composer model seat, merged in from the standalone
+  // `dsh-model-search` plugin. Guarded: this is an independent contribution and
+  // a failure here must never take the settings section down with it. The seat
+  // uses a nested `ctx.inject` for the services it needs (sessions,
+  // modelDirectories, locale), so a profile without them simply renders the
+  // stock seat instead of stranding this plugin's whole client fiber.
+  try {
+    applyModelSeat(ctx)
+  } catch (error) {
+    console.warn('[dsh-omp-advisor] searchable model seat failed to register', error)
+  }
 }

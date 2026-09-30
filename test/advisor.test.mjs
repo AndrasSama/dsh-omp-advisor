@@ -635,8 +635,11 @@ test('client bundle exports service-name injects, not package names', async () =
   assert.equal(registrations.length, 1)
   assert.equal(registrations[0].id, 'dsh-omp-advisor')
   const reactStub = { createElement: () => null, memo: component => component }
+  // `react` and `react-dom` are provided by the host page (build.mjs keeps both
+  // external on purpose). Everything ELSE must arrive as an injected SERVICE,
+  // never as a required package -- that is the property this test protects.
   const exports = registrations[0].factory((spec) => {
-    if (spec === 'react' || spec === 'react/jsx-runtime') return reactStub
+    if (spec === 'react' || spec === 'react/jsx-runtime' || spec === 'react-dom') return reactStub
     throw new Error(`unexpected external require in client bundle: ${spec}`)
   })
   assert.equal(exports.name, 'dsh-omp-advisor')
@@ -662,6 +665,98 @@ test('package.json dsh.client.inject keeps the module-graph package names', asyn
     '@deepseek-ai/dsh-client-connection',
     '@deepseek-ai/dsh-client-ui-settings'
   ])
+})
+
+/**
+ * The searchable composer model seat was merged in from the standalone
+ * `dsh-model-search` plugin, so the client half now publishes TWO contributions:
+ * the settings section and the `conversation.input.model` seat.
+ *
+ * This drives the real bundle through a stub client context and asserts both are
+ * registered. It is the coverage for the merge: if wiring the seat into apply()
+ * breaks, or the seat is dropped from the bundle, this fails.
+ *
+ * The stub models the two shapes the bundle actually uses:
+ *   - `slots.inject(name, factory)` where the settings-section factory is a
+ *     GENERATOR (driven to completion here) and the seat factory is a plain
+ *     function returning the registration.
+ *   - `ctx.inject(names, factory)` for the seat's late-bound services.
+ * `ctx.get('betterSidebar')` returns a stub with a registerTab so the optional
+ * sidebar probe resolves on the first attempt instead of arming a retry timer
+ * that would outlive the test.
+ */
+test('client apply registers the settings section and the merged model seat', async () => {
+  const { readFileSync } = await import('node:fs')
+  const { join, dirname } = await import('node:path')
+  const { fileURLToPath } = await import('node:url')
+  const root = join(dirname(fileURLToPath(import.meta.url)), '..')
+
+  const registrations = []
+  globalThis.window = {
+    __ModuleLoader__: { load: (registration) => registrations.push(registration) }
+  }
+  try {
+    const code = readFileSync(join(root, 'lib/client.js'), 'utf8')
+    // eslint-disable-next-line no-new-func
+    new Function(code)()
+  } finally {
+    delete globalThis.window
+  }
+
+  const reactStub = { createElement: () => null, memo: component => component, Fragment: Symbol('f') }
+  const exports = registrations[0].factory((spec) => {
+    if (spec === 'react' || spec === 'react/jsx-runtime' || spec === 'react-dom') return reactStub
+    throw new Error(`unexpected external require in client bundle: ${spec}`)
+  })
+
+  const registered = []
+  const slots = {
+    register: (descriptor, component) => {
+      registered.push({ descriptor, component })
+      return () => {}
+    },
+    inject: (_name, factory) => {
+      const iterator = factory()
+      if (iterator !== null && typeof iterator === 'object' && typeof iterator.next === 'function') {
+        let step = iterator.next()
+        while (step.done !== true) step = iterator.next()
+      }
+      return () => {}
+    }
+  }
+  const scope = {
+    slots,
+    modelDirectories: {
+      directoryFor: () => ({ store: {}, load: async () => {}, select: async () => true })
+    },
+    sessions: { subagentAddress: () => undefined }
+  }
+  const ctx = {
+    slots,
+    effect: (factory) => {
+      factory()
+      return () => {}
+    },
+    inject: (_names, factory) => {
+      factory(scope)
+      return () => {}
+    },
+    get: (name) => (name === 'betterSidebar' ? { registerTab: () => () => {} } : undefined)
+  }
+
+  exports.apply(ctx)
+
+  const byName = new Map(registered.map(entry => [entry.descriptor.name, entry.descriptor]))
+  assert.ok(byName.has('settings.section'), 'the settings section must still be registered')
+  assert.equal(byName.get('settings.section').id, 'dsh-omp-advisor')
+
+  assert.ok(
+    byName.has('conversation.input.model'),
+    'the merged searchable model seat must be registered'
+  )
+  const seat = byName.get('conversation.input.model')
+  assert.equal(seat.priority, -1, 'the seat must outrank and retire the stock ModelSelect')
+  assert.equal(seat.registrant, 'dsh-omp-advisor')
 })
 
 /* ------------------------- settings: skills / preset / coalesce ------------------------- */

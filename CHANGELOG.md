@@ -6,6 +6,40 @@ v0.9.0; earlier releases are described in the git log and the README.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Searchable composer model seat.** The custom type-to-filter model selector
+  that used to ship as the separate `dsh-model-search` plugin is now part of this
+  plugin: the composer's `conversation.input.model` seat becomes a search box over
+  the same per-session model directory the stock selector and the `/model` popup
+  read, so a choice made in either place stays in sync. Search matches name, id,
+  provider or description; `↑`/`↓` move, `Enter` picks, `Esc` closes, the active
+  row stays scrolled into view, the open panel's footer carries the current model's
+  reasoning-effort chips, a failed catalog load stays visible with a Retry, and the
+  seat renders disabled where a session may not use Agent-bound model RPCs — all
+  exactly as before.
+  - Vendored from `dsh-model-search` v0.1.0 as `src/client/model-select.ts`,
+    registered from the client entry inside a `try`/`catch` so a seat failure can
+    never take the settings section down with it.
+  - Its locale namespace was renamed to `dsh-omp-advisor-model-select`, so a
+    profile that still has the standalone plugin installed during migration cannot
+    register the same namespace twice.
+  - It needs only the host page's `react`/`react-dom`, so it adds **no**
+    `dsh.client.inject` entry and cannot strand this plugin's client fiber.
+  - With the standalone plugin removed from a profile, this is the only
+    registration of the seat; the seat survives the merge because the plugin
+    already had a loader row and a `dsh.client` declaration, so no
+    `cordis.patch.yml` row was needed.
+
+### Changed
+
+- The client-bundle test's external allowlist now permits `react-dom` alongside
+  `react`. Both are provided by the host page; the test's actual purpose — that
+  every other capability arrives as an injected *service* rather than a required
+  package — is unchanged.
+
 ## [0.9.0] — 2026-09-30
 
 ### Added
