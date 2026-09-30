@@ -28,7 +28,7 @@ export interface AdvisorNote {
 }
 
 /** How one advisor note reaches the primary agent. */
-export type AdvisorDeliveryChannel = 'inject' | 'steer'
+export type AdvisorDeliveryChannel = 'inject' | 'steer' | 'followup'
 
 /* --------------------------------- settings -------------------------------- */
 
@@ -173,6 +173,68 @@ export interface PendingMemoryWrite {
 }
 
 /** Resolved `dsh-omp-advisor` settings namespace value. */
+/**
+ * Tool-call interception policy (v0.9.0).
+ *
+ * The gate is evaluated by the host's `tools/pre-execute` waterfall *before* a
+ * tool body runs, so it can genuinely stop a call rather than advise against it.
+ */
+export interface ToolGateSettings {
+  /** Master switch for the gate. Off by default — advice stays advice. */
+  enabled: boolean
+  /** `deny` returns the refusal to the model; `ask` defers to the user. */
+  mode: 'deny' | 'ask'
+  /** Tool names the gate may stop. Empty = the mutating set (bash/write/edit). */
+  tools: string[]
+  /** Advisor severities that arm the gate (default: blockers only). */
+  severities: AdvisorSeverity[]
+  /**
+   * How many times ONE unresolved finding may stop a call before the gate
+   * stands down for it, so a disagreeing advisor can never deadlock the agent.
+   * A new finding re-arms the gate. 0 = unbounded.
+   */
+  maxDenials: number
+  /** Extra guidance appended to the refusal reason the model sees. */
+  note: string
+}
+
+/** A live gate block: the advisor finding currently stopping gated calls. */
+export interface ToolGateBlock {
+  sessionId: string
+  advisor: string
+  severity: AdvisorSeverity
+  note: string
+  /** How many calls this finding has stopped so far. */
+  denials: number
+  /** `maxDenials` at the time the block was armed (0 = unbounded). */
+  maxDenials: number
+}
+
+/**
+ * The host's verdict for one `tools/pre-execute` waterfall pass (DSH >= 0.2).
+ * Mirrors the host union locally so the plugin keeps its dependency-free host
+ * surface. Returning a value WITHOUT calling `next()` ends the waterfall — that
+ * is what makes an interceptor able to stop a call rather than advise about it.
+ */
+export type PreToolDecision =
+  | { kind: 'allow' }
+  | { kind: 'deny'; reason: string; info?: { name: string; code: string; reason?: string } }
+  | { kind: 'cancel' }
+  | {
+      kind: 'ask'
+      reason?: string
+      displayReason?: { readonly en: string; readonly [locale: string]: string }
+    }
+
+/**
+ * The slice of a `tools/pre-execute` execution this plugin reads: which tool is
+ * being called and on whose behalf. The host passes the full `ToolExecution`.
+ */
+export interface ToolExecLike {
+  name?: string
+  agent?: { session?: SessionLike }
+}
+
 export interface AdvisorSettings {
   enabled: boolean
   reviewTrigger: 'step' | 'turn'
@@ -200,6 +262,13 @@ export interface AdvisorSettings {
    * calls abort) and wake the agent with the advisory as a followup.
    */
   interveneOnBlocker: boolean
+  /**
+   * Tool-call interception (v0.9.0): turn advisor verdicts into real host
+   * gates. When armed, a call to a gated tool is stopped by the
+   * `tools/pre-execute` waterfall — `deny` refuses it and returns the reason to
+   * the model, `ask` holds it for the user's decision.
+   */
+  toolGate: ToolGateSettings
   /**
    * Git restore points: snapshot the workspace (side-effect-free git
    * objects under refs/dsh-omp-advisor/**) at turn boundaries and, with
@@ -262,6 +331,11 @@ export interface SessionAdvisorSnapshot {
   title?: string
   /** Workspace path of the session, when known. Additive v0.6.3. */
   cwd?: string
+  /**
+   * The finding currently arming the tool gate for this session, when the gate
+   * is enabled and a gating-severity finding is unresolved. Additive v0.9.0.
+   */
+  toolGate?: ToolGateBlock
 }
 
 /**
@@ -284,6 +358,12 @@ export interface AdvisorEventEntry {
     | 'restore-point'
     | 'attach'
     | 'detach'
+    /** Tool-call interception (v0.9.0): a call was refused by the advisor gate. */
+    | 'gate-denied'
+    /** v0.9.0: a gated call was held for the user's decision. */
+    | 'gate-ask'
+    /** v0.9.0: one finding hit `maxDenials`, so the gate stood down for it. */
+    | 'gate-stood-down'
     | (string & {})
   advisor?: string
   sessionId?: string
@@ -358,8 +438,15 @@ export interface LlmLike {
 /** Minimal cordis context surface used by the plugin. */
 export interface CordisContextLike {
   llm: LlmLike
+  /**
+   * Profile settings service. DSH 0.2 exposes `SettingsForms` (`update`/`replace`
+   * on a Loader entry's config); the 0.1.x line exposed `register`. Both are
+   * optional here — `createSettingsScope` feature-detects which one is present.
+   */
   settings: {
-    register<T>(ns: string, schema: unknown, options?: unknown): SettingsScopeLike<T>
+    register?<T>(ns: string, schema: unknown, options?: unknown): SettingsScopeLike<T>
+    update?(ns: string, patch: object, expectedRevision?: number): Promise<void>
+    replace?(ns: string, section: object, expectedRevision?: number): Promise<void>
   }
   agents: { get(sessionId: string): AgentLike | undefined }
   connection?: {

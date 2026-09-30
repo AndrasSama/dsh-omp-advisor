@@ -43,6 +43,15 @@ interface SettingsView {
   autoRetryDelayMs: number
   autoRetryMax: number
   interveneOnBlocker: boolean
+  /** Tool-call interception policy (v0.9.0). */
+  toolGate?: {
+    enabled?: boolean
+    mode?: 'deny' | 'ask'
+    tools?: string[]
+    severities?: ('nit' | 'concern' | 'blocker')[]
+    maxDenials?: number
+    note?: string
+  }
   restorePoints: boolean
   restorePointKeep: number
   restorePointOnMutation: boolean
@@ -1487,6 +1496,13 @@ export function createSettingsSection(ctx: ClientCtx): React.ComponentType<{ clo
 
     const severities = value.interruptSeverities ?? ['concern', 'blocker']
 
+    // Tool-call interception policy (v0.9.0). The whole `toolGate` object is
+    // written on every edit, mirroring how the Memory tab patches `memory`.
+    const gate = value.toolGate ?? {}
+    const patchToolGate = (patch: Record<string, unknown>): void => {
+      write('toolGate', { ...gate, ...patch })
+    }
+
     const tabs = [
       { id: 'general' as const, label: 'General' },
       { id: 'advisors' as const, label: `Advisors (${advisors.length})` },
@@ -1714,8 +1730,109 @@ export function createSettingsSection(ctx: ClientCtx): React.ComponentType<{ clo
             <span style={{ ...styles.hint, color: 'rgb(220,160,90)' }}>
               Escalation, off by default. With review trigger “step”, a blocker raised while the primary agent
               is running aborts the step's not-yet-started tool calls and wakes the agent with the advisory.
-              Already-running tool calls are never killed; DSH offers no pre-call veto, so fast tools may finish
-              before the advisor reacts. Advice stays advice unless you opt in.
+              Already-running tool calls are never killed. To refuse a call <em>before</em> it runs, use the
+              tool gate below. Advice stays advice unless you opt in.
+            </span>
+          </div>
+          <div style={styles.row}>
+            <span style={styles.label}>Tool gate</span>
+            <label>
+              <input
+                type="checkbox"
+                checked={gate.enabled === true}
+                onChange={event => patchToolGate({ enabled: event.target.checked })}
+              />{' '}
+              stop a tool call before it runs while an advisor finding is unresolved
+            </label>
+            <span style={styles.hint}>mode</span>
+            <select
+              style={{ ...styles.input, width: 'auto' }}
+              value={gate.mode ?? 'deny'}
+              onChange={event => patchToolGate({ mode: event.target.value as 'deny' | 'ask' })}
+            >
+              <option value="deny">deny — refuse the call, tell the model why</option>
+              <option value="ask">ask — hold the call for your decision</option>
+            </select>
+          </div>
+          <div style={styles.row}>
+            <span style={styles.label} />
+            {(['nit', 'concern', 'blocker'] as const).map(severity => (
+              <label key={severity}>
+                <input
+                  type="checkbox"
+                  checked={(gate.severities ?? ['blocker']).includes(severity)}
+                  onChange={event => {
+                    const current = gate.severities ?? ['blocker']
+                    const next = event.target.checked
+                      ? [...current, severity]
+                      : current.filter(item => item !== severity)
+                    patchToolGate({ severities: next })
+                  }}
+                />{' '}
+                {severity}
+              </label>
+            ))}
+            <span style={styles.hint}>Findings at these severities arm the gate.</span>
+          </div>
+          <div style={styles.row}>
+            <span style={styles.label} />
+            <span style={styles.hint}>
+              Refuse one finding at most{' '}
+              <input
+                type="number"
+                min={0}
+                max={20}
+                step={1}
+                style={{ ...styles.input, width: 60 }}
+                value={gate.maxDenials ?? 2}
+                onChange={event => {
+                  const parsed = Number.parseInt(event.target.value, 10)
+                  if (Number.isFinite(parsed)) patchToolGate({ maxDenials: Math.min(20, Math.max(0, parsed)) })
+                }}
+              />{' '}
+              time(s), then stand down so a disagreeing advisor can never deadlock the agent (0 = never stand
+              down). A new finding re-arms it.
+            </span>
+          </div>
+          <div style={styles.row}>
+            <span style={styles.label} />
+            <span style={styles.hint}>
+              Gated tools (comma-separated; empty = the mutating set bash, write, edit):{' '}
+              <input
+                type="text"
+                style={{ ...styles.input, width: 320 }}
+                placeholder="bash, write, edit"
+                value={(gate.tools ?? []).join(', ')}
+                onChange={event =>
+                  patchToolGate({
+                    tools: event.target.value
+                      .split(',')
+                      .map(item => item.trim())
+                      .filter(item => item !== '')
+                  })
+                }
+              />
+            </span>
+          </div>
+          <div style={styles.row}>
+            <span style={styles.label} />
+            <span style={styles.hint}>
+              Extra guidance appended to the refusal the model sees:{' '}
+              <input
+                type="text"
+                style={{ ...styles.input, width: 420 }}
+                placeholder="Address the finding or explain why it is wrong."
+                value={gate.note ?? ''}
+                onChange={event => patchToolGate({ note: event.target.value })}
+              />
+            </span>
+          </div>
+          <div style={styles.row}>
+            <span style={styles.label} />
+            <span style={{ ...styles.hint, opacity: 0.75 }}>
+              Evaluated by the host's <code>tools/pre-execute</code> waterfall, so the tool body genuinely does
+              not run. Denials and stand-downs appear in the Monitor tab, and an armed finding shows in the
+              sidebar with a Clear gate button.
             </span>
           </div>
           <div style={styles.row}>

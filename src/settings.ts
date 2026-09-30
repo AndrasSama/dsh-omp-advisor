@@ -6,7 +6,7 @@
  */
 import z from '@deepseek-ai/schemastery'
 import { normalizeMemorySettings } from './memory/engines'
-import type { AdvisorEntry, AdvisorSettings } from './types'
+import type { AdvisorEntry, AdvisorSettings, AdvisorSeverity, ToolGateSettings } from './types'
 
 export const SETTINGS_NAMESPACE = 'dsh-omp-advisor'
 
@@ -97,6 +97,47 @@ export const advisorSettingsSchema = z.object({
     .default(false)
     .description(
       'Escalation: when an advisor raises a blocker while the primary agent is running, cancel the running step (undispatched tool calls are aborted) and wake the agent with the advisory. Off by default — advice stays advice.'
+    ),
+  toolGate: z
+    .object({
+      enabled: z
+        .boolean()
+        .default(false)
+        .description(
+          'Hard gate: stop a tool call BEFORE its body runs while an advisor has an unresolved finding for the session. Unlike interveneOnBlocker — which cancels the running step after advice was already raised — this refuses the call itself and hands the reason back to the model.'
+        ),
+      mode: z
+        .union(['deny', 'ask'])
+        .default('deny')
+        .description(
+          "deny = the call is refused and the reason goes to the model. ask = the call is held for your decision (localized prompt in the UI)."
+        ),
+      tools: z
+        .array(z.string())
+        .default([])
+        .description(
+          'Tool names the gate may stop. Empty = the mutating set (bash, write, edit). Add others explicitly to gate a custom or transport tool.'
+        ),
+      severities: z
+        .array(z.union(['nit', 'concern', 'blocker']))
+        .default(['blocker'])
+        .description('Advisor severities that arm the gate. Defaults to blockers only.'),
+      maxDenials: z
+        .number()
+        .min(0)
+        .max(20)
+        .default(2)
+        .description(
+          'How many times ONE unresolved finding may stop a call before the gate stands down for it, so a disagreeing advisor can never deadlock the agent. A new finding re-arms it. 0 = no bound (stopped until the finding is cleared).'
+        ),
+      note: z
+        .string()
+        .default('')
+        .description('Extra guidance appended to the refusal reason the model sees.')
+    })
+    .default({})
+    .description(
+      'Tool-call interception (v0.9.0): convert advisor verdicts into real PreToolDecision gates — deny or ask — evaluated by the host before the tool body executes.'
     ),
   restorePoints: z
     .boolean()
@@ -204,6 +245,35 @@ export function advisorMatchesWorkspace(
 }
 
 /** Normalize a resolved settings value (defensive; the schema already validates). */
+function coerceToolGateMaxDenials(raw: unknown): number {
+  const value = typeof raw === 'number' && Number.isFinite(raw) ? Math.round(raw) : 2
+  return Math.min(20, Math.max(0, value))
+}
+
+/**
+ * Normalize the tool-gate policy (v0.9.0). Unknown keys are dropped; an empty
+ * severity list falls back to blockers so enabling the gate can never arm it for
+ * nothing.
+ */
+export function normalizeToolGate(raw: unknown): ToolGateSettings {
+  const value = (raw ?? {}) as Partial<ToolGateSettings>
+  const severities = Array.isArray(value.severities)
+    ? value.severities.filter((s): s is AdvisorSeverity => s === 'nit' || s === 'concern' || s === 'blocker')
+    : []
+  return {
+    enabled: value.enabled === true,
+    mode: value.mode === 'ask' ? 'ask' : 'deny',
+    tools: Array.isArray(value.tools)
+      ? value.tools
+          .filter((t): t is string => typeof t === 'string' && t.trim() !== '')
+          .map(t => t.trim())
+      : [],
+    severities: severities.length > 0 ? severities : (['blocker'] as AdvisorSeverity[]),
+    maxDenials: coerceToolGateMaxDenials(value.maxDenials),
+    note: typeof value.note === 'string' ? value.note.trim() : ''
+  }
+}
+
 export function normalizeSettings(raw: unknown): AdvisorSettings {
   const value = (raw ?? {}) as Partial<AdvisorSettings>
   const advisors = Array.isArray(value.advisors) ? value.advisors : []
@@ -274,6 +344,7 @@ export function normalizeSettings(raw: unknown): AdvisorSettings {
     autoRetryDelayMs: coerceAutoRetryDelayMs((value as { autoRetryDelayMs?: unknown }).autoRetryDelayMs),
     autoRetryMax: coerceAutoRetryMax((value as { autoRetryMax?: unknown }).autoRetryMax),
     interveneOnBlocker: (value as { interveneOnBlocker?: unknown }).interveneOnBlocker === true,
+    toolGate: normalizeToolGate((value as { toolGate?: unknown }).toolGate),
     restorePoints: (value as { restorePoints?: unknown }).restorePoints === true,
     restorePointKeep: coerceRestorePointKeep((value as { restorePointKeep?: unknown }).restorePointKeep),
     restorePointOnMutation: (value as { restorePointOnMutation?: unknown }).restorePointOnMutation !== false,
@@ -340,6 +411,7 @@ export function normalizeSettingsLenient(raw: unknown): AdvisorSettings {
     autoRetryDelayMs: coerceAutoRetryDelayMs((value as { autoRetryDelayMs?: unknown }).autoRetryDelayMs),
     autoRetryMax: coerceAutoRetryMax((value as { autoRetryMax?: unknown }).autoRetryMax),
     interveneOnBlocker: (value as { interveneOnBlocker?: unknown }).interveneOnBlocker === true,
+    toolGate: normalizeToolGate((value as { toolGate?: unknown }).toolGate),
     restorePoints: (value as { restorePoints?: unknown }).restorePoints === true,
     restorePointKeep: coerceRestorePointKeep((value as { restorePointKeep?: unknown }).restorePointKeep),
     restorePointOnMutation: (value as { restorePointOnMutation?: unknown }).restorePointOnMutation !== false,

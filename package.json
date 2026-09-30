@@ -1,6 +1,6 @@
 {
   "name": "dsh-omp-advisor",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "description": "Ward Council — oh-my-pi advisor subsystem ported to DeepSeek Harness: independent reviewer models watch your agent's live transcript, investigate with read-only tools, and advise it. Advisors guide. The ward protects. The model executes.",
   "license": "SEE LICENSE IN LICENSE",
   "type": "module",
@@ -16,6 +16,7 @@
     "assets",
     "cordis.patch.yml",
     "README.md",
+    "CHANGELOG.md",
     "LICENSE",
     "NOTICE-oh-my-pi-LICENSE"
   ],
@@ -57,7 +58,7 @@
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.2",
-    "@deepseek-ai/dsh-llm": "^0.1.2-alpha.4",
+    "@deepseek-ai/dsh-llm": "^0.1.2-alpha.4 || ^0.2.0-rc.2",
     "@deepseek-ai/schemastery": "^3.18.2",
     "dsh-better-sidebar": "*"
   },

@@ -16,19 +16,21 @@ import { registerAdvisorRpc } from './rpc'
 import { createRestorePoint, pruneRestorePoints } from './restore-points'
 import { SessionAdvisorRuntime } from './runtime'
 import {
-  SETTINGS_NAMESPACE,
   advisorMatchesWorkspace,
-  advisorSettingsSchema,
   normalizeSettings,
   normalizeSettingsLenient
 } from './settings'
+import { assertAdvisorsRunnable, createSettingsScope } from './settings-scope'
 import type {
   AdvisorEntry,
   AdvisorEventEntry,
   AdvisorSettings,
   CordisContextLike,
+  PreToolDecision,
   SessionAdvisorSnapshot,
-  SessionLike
+  SessionLike,
+  ToolExecLike,
+  ToolGateBlock
 } from './types'
 
 export const SERVICE_NAME = 'dsh-omp-advisor'
@@ -43,6 +45,10 @@ const MUTATION_SNAPSHOT_THROTTLE_MS = 2000
 const EVENT_RING_LIMIT = 100
 /** Clip for event detail text (plugin-authored, still kept short). */
 const EVENT_DETAIL_LIMIT = 160
+/** Error identity carried on a gate denial, for policy/diagnostics consumers. */
+export const ADVISOR_GATE_ERROR_NAME = 'AdvisorToolGateDenied'
+/** Stable machine code for a gate denial. */
+export const ADVISOR_GATE_CODE = 'ADVISOR_TOOL_GATE'
 
 function sessionIdOf(session: SessionLike): string {
   return String(session.id)
@@ -72,6 +78,11 @@ export class AdvisorService extends Service {
   private lastMutationSnapshot = new Map<string, number>()
   /** Live restore-point counts per session for the snapshot surface. */
   private restorePointCounts = new Map<string, number>()
+  /**
+   * Sessions whose current gate finding already exhausted `maxDenials`, so the
+   * stand-down is recorded once instead of on every subsequent tool call.
+   */
+  private gateStoodDown = new Set<string>()
   /** Service-wide activity ring for the monitor surfaces (bounded, in-memory). */
   private events: AdvisorEventEntry[] = []
   /** Advisor memory engines (v0.7.0): probing, recall, write gate. */
@@ -85,21 +96,14 @@ export class AdvisorService extends Service {
 
   constructor(
     private readonly hostCtx: CordisContextLike,
-    _config: unknown
+    config: unknown
   ) {
     super(hostCtx as never, SERVICE_NAME)
 
-    this.settingsScope = hostCtx.settings.register(SETTINGS_NAMESPACE, advisorSettingsSchema, {
-      applies: 'live',
-      validate: (raw: unknown) => {
-        const value = normalizeSettings(raw)
-        for (const entry of value.advisors) {
-          if (!entry.provider || !entry.model) {
-            throw new Error(`advisor "${entry.name}" needs both provider and model from the model list`)
-          }
-        }
-      }
-    }) as never
+    // Settings binding, version-adaptive: DSH 0.2 makes a Loader entry's
+    // `Config` the settings (validated + defaulted by the Loader, edited through
+    // `settings.update`); 0.1.x exposed `settings.register`. See settings-scope.
+    this.settingsScope = createSettingsScope(hostCtx, config)
 
     this.settingsValue = normalizeSettings(this.settingsScope.get())
 
@@ -152,28 +156,22 @@ export class AdvisorService extends Service {
     hostCtx.on('fs/edit-intent', (_target: unknown, exec: unknown, next: () => unknown) => {
       return snapshotBeforeExec(exec, 'fs/edit-intent').then(next)
     })
-    hostCtx.on('tools/pre-execute', (exec: { name?: string; agent?: { session?: SessionLike } }, next: () => unknown) => {
-      if (!MUTATION_TOOLS.has(exec?.name ?? '')) return next()
-      return snapshotBeforeExec(exec, exec?.name ?? 'tool').then(next)
+    hostCtx.on('tools/pre-execute', async (exec: ToolExecLike, next: () => unknown) => {
+      const decision = this.gateDecision(exec)
+      // A denied call's body never runs, so there is nothing to snapshot.
+      if (decision?.kind === 'deny') return decision
+      // Snapshot before a mutation — including one the user is about to approve,
+      // because an `ask` also ends this waterfall and would otherwise reach the
+      // tool body with no pre-mutation restore point.
+      if (MUTATION_TOOLS.has(exec?.name ?? '')) {
+        await snapshotBeforeExec(exec, exec?.name ?? 'tool')
+      }
+      return decision ?? next()
     })
 
     this.settingsScope.watch((next: unknown) => {
-      const value = normalizeSettings(next)
-      this.settingsValue = value
-      this.memory.updateSettings(value.memory)
-      void this.memory.probeAll()
-      if (!value.enabled) {
-        for (const [id, runtime] of this.runtimes) {
-          runtime.dispose()
-          this.runtimes.delete(id)
-        }
-        this.sessionCwds.clear()
-        return
-      }
-      for (const [id, runtime] of this.runtimes) {
-        const cwd = this.sessionCwds.get(id) ?? ''
-        runtime.rebuild(this.scopedSettings(value, cwd))
-      }
+      this.settingsValue = normalizeSettings(next)
+      this.applySettings(this.settingsValue)
     })
 
     if (hostCtx.connection) {
@@ -183,6 +181,115 @@ export class AdvisorService extends Service {
 
   get settings(): AdvisorSettings {
     return this.settingsValue
+  }
+
+  /**
+   * Push a settings value into the live runtimes and the memory manager. Shared
+   * by the 0.1.x scope watcher and the 0.2 write path: on 0.2 there is no
+   * watcher to fire, because a config edit restarts the plugin instead.
+   */
+  private applySettings(value: AdvisorSettings): void {
+    this.memory.updateSettings(value.memory)
+    void this.memory.probeAll()
+    // A disabled gate keeps no per-session stand-down bookkeeping.
+    if (!value.toolGate.enabled) this.gateStoodDown.clear()
+    if (!value.enabled) {
+      for (const [id, runtime] of this.runtimes) {
+        runtime.dispose()
+        this.runtimes.delete(id)
+      }
+      this.sessionCwds.clear()
+      return
+    }
+    for (const [id, runtime] of this.runtimes) {
+      const cwd = this.sessionCwds.get(id) ?? ''
+      runtime.rebuild(this.scopedSettings(value, cwd))
+    }
+  }
+
+  /**
+   * Tool-call interception (v0.9.0). Evaluated by the host's `tools/pre-execute`
+   * waterfall BEFORE the tool body runs, so a verdict here genuinely stops the
+   * call — unlike advice, which the model is free to ignore.
+   *
+   * Returns `undefined` to let the call proceed. The bound (`maxDenials`) is
+   * what keeps a disagreeing advisor from deadlocking the agent: after that many
+   * refusals for one finding, the gate stands down and the call is allowed. A
+   * fresh finding re-arms it.
+   */
+  private gateDecision(exec: ToolExecLike): PreToolDecision | undefined {
+    const gate = this.settingsValue.toolGate
+    if (!gate.enabled) return undefined
+    const name = exec?.name ?? ''
+    const gated = gate.tools.length > 0 ? new Set(gate.tools) : MUTATION_TOOLS
+    if (!gated.has(name)) return undefined
+    const session = exec?.agent?.session
+    if (!session) return undefined
+    const id = sessionIdOf(session)
+    const runtime = this.runtimes.get(id)
+    const block = runtime?.gateBlock()
+    if (!block) return undefined
+    // A fresh finding resets the bound, so the stand-down flag must reset too.
+    if (block.denials === 0) this.gateStoodDown.delete(id)
+    if (block.maxDenials > 0 && block.denials >= block.maxDenials) {
+      if (!this.gateStoodDown.has(id)) {
+        this.gateStoodDown.add(id)
+        this.recordEvent('gate-stood-down', {
+          sessionId: id,
+          advisor: block.advisor,
+          detail: `${block.denials} refusals for one finding; allowing "${name}"`
+        })
+      }
+      return undefined
+    }
+    runtime!.recordGateDenial()
+    const attempt = block.denials + 1
+    const bound = block.maxDenials > 0 ? ` (${attempt}/${block.maxDenials})` : ''
+    const note = block.note.length > EVENT_DETAIL_LIMIT ? `${block.note.slice(0, EVENT_DETAIL_LIMIT)}…` : block.note
+    const reason =
+      `Advisor "${block.advisor}" raised a ${block.severity}, so the tool gate stopped "${name}" before it ran${bound}: ` +
+      `${note}${gate.note ? ` ${gate.note}` : ''}`
+    this.recordEvent(gate.mode === 'ask' ? 'gate-ask' : 'gate-denied', {
+      sessionId: id,
+      advisor: block.advisor,
+      detail: `${name}${bound}: ${note}`
+    })
+    if (gate.mode === 'ask') {
+      return {
+        kind: 'ask',
+        reason,
+        displayReason: {
+          en: `Advisor "${block.advisor}" raised a ${block.severity}. Allow "${name}"?`,
+          zh: `顾问「${block.advisor}」提出了 ${block.severity} 级别的质疑。是否允许执行「${name}」？`
+        }
+      }
+    }
+    return {
+      kind: 'deny',
+      reason,
+      info: { name: ADVISOR_GATE_ERROR_NAME, code: ADVISOR_GATE_CODE, reason: note }
+    }
+  }
+
+  /** The live gate block for a session, for the monitor surfaces. */
+  gateBlock(sessionId: string): ToolGateBlock | undefined {
+    return this.runtimes.get(sessionId)?.gateBlock()
+  }
+
+  /**
+   * Clear an armed gate finding. With no sessionId, clears every session's
+   * finding. Returns how many were cleared.
+   */
+  clearToolGate(sessionId?: string): number {
+    if (sessionId) {
+      const cleared = this.runtimes.get(sessionId)?.clearGate() === true
+      this.gateStoodDown.delete(sessionId)
+      return cleared ? 1 : 0
+    }
+    let cleared = 0
+    for (const runtime of this.runtimes.values()) if (runtime.clearGate()) cleared++
+    this.gateStoodDown.clear()
+    return cleared
   }
 
   /**
@@ -252,23 +359,28 @@ export class AdvisorService extends Service {
   }
 
   /**
-   * Merge a partial settings patch through the Host settings domain
-   * (schema-resolved, validated, watchers notified — the same path the
-   * settings document uses everywhere else) and answer the resolved value.
-   * The settings section's write transport is the plugin's own RPC channel
-   * because DSH keeps `settingsScope` persistence loopback-only; validation
-   * failures surface as thrown errors the RPC layer folds into bad-request.
+   * Merge a partial settings patch through the Host settings domain and answer
+   * the resolved value: on 0.1.x that is the registered scope (schema-resolved,
+   * validated, watchers notified); on 0.2 it is the Loader entry's config, and
+   * the write restarts the plugin so the replacement service reads the new value.
+   * The settings section's write transport is the plugin's own RPC channel, so
+   * validation failures surface as thrown errors the RPC layer folds into
+   * bad-request (hence the async contract).
    *
    * Returns the NON-destructive editor view so clearing a name/description
    * in the form does not delete the advisor; the runtime's strict value is
    * refreshed separately so an incomplete advisor never runs.
    */
-  updateSettings(patch: unknown): AdvisorSettings {
+  async updateSettings(patch: unknown): Promise<AdvisorSettings> {
     if (typeof patch !== 'object' || patch === null || Array.isArray(patch)) {
       throw new Error('settings patch must be a plain object')
     }
-    this.settingsScope.update(patch)
+    // Restate the 0.1.x write-time contract before anything is persisted (see
+    // assertAdvisorsRunnable on why this is defensive rather than the real gate).
+    assertAdvisorsRunnable({ ...(this.settingsScope.get() as object), ...(patch as object) })
+    await this.settingsScope.update(patch)
     this.settingsValue = normalizeSettings(this.settingsScope.get())
+    this.applySettings(this.settingsValue)
     return normalizeSettingsLenient(this.settingsScope.get())
   }
 
@@ -282,7 +394,7 @@ export class AdvisorService extends Service {
    * authored inclusion patterns); `active=true` clears it, turns the advisor on,
    * and ensures its inclusion patterns cover the workspace.
    */
-  setAdvisorWorkspace(advisorName: string, cwd: string, active: boolean): AdvisorSettings {
+  async setAdvisorWorkspace(advisorName: string, cwd: string, active: boolean): Promise<AdvisorSettings> {
     if (typeof advisorName !== 'string' || advisorName.trim() === '') {
       throw new Error('advisor must be a non-empty string')
     }
@@ -296,7 +408,7 @@ export class AdvisorService extends Service {
     const advisors = active
       ? enableAdvisorHere(current.advisors, advisorName, cwd)
       : disableAdvisorHere(current.advisors, advisorName, cwd)
-    return this.updateSettings({ advisors })
+    return await this.updateSettings({ advisors })
   }
 
   /**
@@ -306,7 +418,7 @@ export class AdvisorService extends Service {
    * entry to known fields, so a concurrent edit is not clobbered and no unknown
    * keys are persisted.
    */
-  addWorkspaceAdvisor(rawEntry: unknown): AdvisorSettings {
+  async addWorkspaceAdvisor(rawEntry: unknown): Promise<AdvisorSettings> {
     if (typeof rawEntry !== 'object' || rawEntry === null || Array.isArray(rawEntry)) {
       throw new Error('entry must be an object')
     }
@@ -340,7 +452,7 @@ export class AdvisorService extends Service {
         : {}),
       ...(typeof sent.preset === 'string' && sent.preset !== '' ? { preset: sent.preset } : {})
     }
-    return this.updateSettings({ advisors: [...current.advisors, entry] })
+    return await this.updateSettings({ advisors: [...current.advisors, entry] })
   }
 
   /**
@@ -493,6 +605,7 @@ export class AdvisorService extends Service {
     this.snapshotLocks.delete(sessionId)
     this.lastMutationSnapshot.delete(sessionId)
     this.restorePointCounts.delete(sessionId)
+    this.gateStoodDown.delete(sessionId)
     if (!runtime) return
     runtime.dispose()
     this.runtimes.delete(sessionId)
@@ -512,10 +625,12 @@ export class AdvisorService extends Service {
       return { sessionId, active: false, advisors: [], recentNotes: [], ...identity }
     }
     const count = this.restorePointCounts.get(sessionId)
+    const gate = runtime.gateBlock()
     return {
       sessionId,
       ...runtime.snapshot(),
       ...(count !== undefined ? { restorePoints: count } : {}),
+      ...(gate ? { toolGate: gate } : {}),
       ...identity
     }
   }

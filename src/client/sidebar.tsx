@@ -61,6 +61,14 @@ interface SidebarSessionView {
   active: boolean
   advisors: SidebarAdvisorStatus[]
   restorePoints?: number
+  /** Armed tool-gate finding (v0.9.0), when the gate is stopping calls. */
+  toolGate?: {
+    advisor: string
+    severity: string
+    note: string
+    denials: number
+    maxDenials: number
+  }
   title?: string
   cwd?: string
 }
@@ -203,6 +211,14 @@ async function addWorkspaceAdvisorRpc(entry: WorkspaceAdvisorEntry): Promise<voi
   if (!connection) throw new Error('no connection')
   const result = await connection.rpc.call('/dsh-omp-advisor', 'addWorkspaceAdvisor', { entry })
   unwrapRpcResult<{ settings: unknown }>(result, 'add workspace advisor')
+}
+
+/** Release the advisor tool gate for one session (v0.9.0). */
+async function clearToolGateRpc(sessionId: string): Promise<void> {
+  const connection = connectionRef
+  if (!connection) throw new Error('no connection')
+  const result = await connection.rpc.call('/dsh-omp-advisor', 'clearToolGate', { sessionId })
+  unwrapRpcResult<{ cleared: number }>(result, 'clear tool gate')
 }
 
 function loadModelCatalog(): Promise<ModelCatalog | null> {
@@ -469,6 +485,29 @@ function AdvisorsMonitorTab(props: { scopedSessionId?: string }): React.ReactEle
           )}
           {typeof session.restorePoints === 'number' && session.restorePoints > 0 && (
             <span style={chip}>{session.restorePoints} restore points</span>
+          )}
+          {session.toolGate && (
+            <span
+              style={{ ...chip, borderColor: 'rgb(200,120,90)', color: 'rgb(230,150,120)' }}
+              title={session.toolGate.note}
+            >
+              tool gate: {session.toolGate.advisor} {session.toolGate.severity}
+              {session.toolGate.maxDenials > 0
+                ? ` (${session.toolGate.denials}/${session.toolGate.maxDenials})`
+                : ''}
+            </span>
+          )}
+          {session.toolGate && (
+            <button
+              type="button"
+              style={chip}
+              title="Let gated tool calls through again"
+              onClick={() =>
+                runToggle(clearToolGateRpc(session.sessionId), `clear gate for "${name}"`)
+              }
+            >
+              Clear gate
+            </button>
           )}
         </div>
         {session.advisors.length === 0 ? (

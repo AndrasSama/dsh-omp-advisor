@@ -6,6 +6,7 @@
  *   setAdvisorWorkspace {advisor, cwd, active}
  *                                     -> atomic workspace-scoped enable/disable
  *   addWorkspaceAdvisor {entry}       -> atomic append of one advisor
+ *   clearToolGate {sessionId?}        -> clear the advisor tool gate (v0.9.0)
  *   pause     {sessionId, advisor}    -> pause one advisor
  *   resume    {sessionId, advisor}    -> resume one advisor
  *   reviewNow {sessionId}             -> queue an immediate review pass
@@ -95,7 +96,7 @@ export function registerAdvisorRpc(ctx: CordisContextLike, service: AdvisorServi
               return badRequest(String(error instanceof Error ? error.message : error))
             }
             try {
-              return { ok: true, value: { settings: service.updateSettings(patch) } }
+              return { ok: true, value: { settings: await service.updateSettings(patch) } }
             } catch (error) {
               // Schema/validation rejections are user input errors.
               return badRequest(String(error instanceof Error ? error.message : error))
@@ -114,7 +115,7 @@ export function registerAdvisorRpc(ctx: CordisContextLike, service: AdvisorServi
             }
             const active = payload.active === true
             try {
-              return { ok: true, value: { settings: service.setAdvisorWorkspace(advisor, cwd, active) } }
+              return { ok: true, value: { settings: await service.setAdvisorWorkspace(advisor, cwd, active) } }
             } catch (error) {
               return badRequest(String(error instanceof Error ? error.message : error))
             }
@@ -122,10 +123,16 @@ export function registerAdvisorRpc(ctx: CordisContextLike, service: AdvisorServi
           case 'addWorkspaceAdvisor': {
             // Atomic append of one caller-built advisor (v0.7.6).
             try {
-              return { ok: true, value: { settings: service.addWorkspaceAdvisor(payload.entry) } }
+              return { ok: true, value: { settings: await service.addWorkspaceAdvisor(payload.entry) } }
             } catch (error) {
               return badRequest(String(error instanceof Error ? error.message : error))
             }
+          }
+          case 'clearToolGate': {
+            // v0.9.0: drop the finding arming the tool gate so a stopped call can
+            // proceed. No sessionId clears every session's finding.
+            const sessionId = typeof payload.sessionId === 'string' ? payload.sessionId : undefined
+            return { ok: true, value: { cleared: service.clearToolGate(sessionId) } }
           }
           case 'pause':
           case 'resume': {

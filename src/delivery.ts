@@ -86,7 +86,10 @@ export function resolveDeliveryChannel(opts: {
   primaryRunning: boolean
 }): AdvisorDeliveryChannel {
   const { severity, interruptSeverities, primaryRunning } = opts
-  if (!isInterruptingSeverity(severity, interruptSeverities)) return 'inject'
+  // `agent.inject()` queues for the next step WITHOUT waking the driver, so it
+  // only reaches a turn that is already running. A note that arrives once the
+  // primary went idle must wake it: use `followup` (next turn + wakeup).
+  if (!isInterruptingSeverity(severity, interruptSeverities)) return primaryRunning ? 'inject' : 'followup'
   if (primaryRunning) return 'steer'
-  return severity === 'blocker' ? 'steer' : 'inject'
+  return severity === 'blocker' ? 'steer' : 'followup'
 }

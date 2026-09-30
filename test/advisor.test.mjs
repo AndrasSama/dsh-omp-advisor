@@ -114,14 +114,14 @@ test('advise gate normalizes whitespace for dedupe keys', () => {
 
 /* ------------------------------ delivery mapping ---------------------------- */
 
-test('delivery: nits always inject', () => {
+test('delivery: nits inject while running and wake as followup while idle', () => {
   assert.equal(
     resolveDeliveryChannel({ severity: 'nit', interruptSeverities: ['concern', 'blocker'], primaryRunning: true }),
     'inject'
   )
   assert.equal(
     resolveDeliveryChannel({ severity: undefined, interruptSeverities: ['concern', 'blocker'], primaryRunning: false }),
-    'inject'
+    'followup'
   )
 })
 
@@ -136,10 +136,10 @@ test('delivery: interrupting severities steer while the primary runs', () => {
   )
 })
 
-test('delivery: idle primary downgrades concern to inject but blocker still steers', () => {
+test('delivery: idle primary wakes with followup and blocker still steers', () => {
   assert.equal(
     resolveDeliveryChannel({ severity: 'concern', interruptSeverities: ['concern', 'blocker'], primaryRunning: false }),
-    'inject'
+    'followup'
   )
   assert.equal(
     resolveDeliveryChannel({ severity: 'blocker', interruptSeverities: ['concern', 'blocker'], primaryRunning: false }),
@@ -794,23 +794,23 @@ test('coalesce off (0ms) delivers every note immediately', () => {
   const runtime = makeRuntime({ coalesceMs: 0, agent })
   runtime.deliver('note one', 'nit', 'a')
   runtime.deliver('note two', 'nit', 'a')
-  assert.equal(agent.injected.length, 2)
+  assert.equal(agent.followups.length, 2)
   assert.equal(agent.steered.length, 0)
   runtime.dispose()
 })
 
-test('coalesce window batches notes from all advisors into one inject message', async () => {
+test('coalesce window batches notes from all advisors into one followup message', async () => {
   const agent = stubAgent()
   const runtime = makeRuntime({ coalesceMs: 40, agent })
   runtime.deliver('note one', 'nit', 'a')
   runtime.deliver('note two', 'nit', 'a')
   // Still inside the window: nothing delivered yet.
-  assert.equal(agent.injected.length, 0)
+  assert.equal(agent.followups.length, 0)
   assert.equal(agent.steered.length, 0)
   await new Promise(resolve => setTimeout(resolve, 100))
-  assert.equal(agent.injected.length, 1)
-  assert.match(agent.injected[0].text, /note one/)
-  assert.match(agent.injected[0].text, /note two/)
+  assert.equal(agent.followups.length, 1)
+  assert.match(agent.followups[0].text, /note one/)
+  assert.match(agent.followups[0].text, /note two/)
   runtime.dispose()
 })
 
@@ -1018,17 +1018,17 @@ test('roundtrip: disableAdvisorHere survives both normalizers and stops host mat
   assert.deepEqual(lenient.advisors[0].disabledWorkspaces, [`=${WS}`])
 })
 
-test('service: setAdvisorWorkspace disable-here stops attachment in that cwd only', () => {
+test('service: setAdvisorWorkspace disable-here stops attachment in that cwd only', async () => {
   const raw = {
     ...serviceBaseRaw,
     advisors: [{ name: 'sentinel', provider: 'p', model: 'm', maxTurns: 2, enabled: true }]
   }
   const ctx = mockHostCtx({ raw, llm: scriptedLlm([]), agents: new Map() })
-  const service = new AdvisorService(ctx, {})
+  const service = new AdvisorService(ctx, ctx.config)
   // The always-on advisor initially attaches to this workspace.
   assert.equal(advisorMatchesWorkspace(service['settingsValue'].advisors[0], WS), true)
   // Disable it here (atomic host-side load-modify-save).
-  service.setAdvisorWorkspace('sentinel', WS, false)
+  await service.setAdvisorWorkspace('sentinel', WS, false)
   const after = service['settingsValue'].advisors[0]
   assert.equal(after.enabled, true) // global switch untouched
   assert.deepEqual(after.disabledWorkspaces, [`=${WS}`])
@@ -1037,19 +1037,19 @@ test('service: setAdvisorWorkspace disable-here stops attachment in that cwd onl
   // The snapshot (lenient view) carries the exclusion too.
   assert.deepEqual(service.settingsView.advisors[0].disabledWorkspaces, [`=${WS}`])
   // Enable-here restores attachment.
-  service.setAdvisorWorkspace('sentinel', WS, true)
+  await service.setAdvisorWorkspace('sentinel', WS, true)
   const restored = service['settingsValue'].advisors[0]
   assert.equal(advisorMatchesWorkspace(restored, WS), true)
 })
 
-test('service: addWorkspaceAdvisor appends a sanitized, uniquely-named, scoped advisor', () => {
+test('service: addWorkspaceAdvisor appends a sanitized, uniquely-named, scoped advisor', async () => {
   const raw = {
     ...serviceBaseRaw,
     advisors: [{ name: 'advisor', provider: 'p', model: 'm', maxTurns: 2, enabled: true }]
   }
   const ctx = mockHostCtx({ raw, llm: scriptedLlm([]), agents: new Map() })
-  const service = new AdvisorService(ctx, {})
-  const view = service.addWorkspaceAdvisor({
+  const service = new AdvisorService(ctx, ctx.config)
+  const view = await service.addWorkspaceAdvisor({
     name: 'advisor', // collides -> host must re-name
     provider: 'p2',
     model: 'm2',
@@ -1068,7 +1068,7 @@ test('service: addWorkspaceAdvisor appends a sanitized, uniquely-named, scoped a
   assert.equal(added.preset, 'x')
   assert.equal('bogusKey' in added, false)
   // Missing provider/model is rejected.
-  assert.throws(() => service.addWorkspaceAdvisor({ name: 'x', model: 'm' }), /provider/)
+  await assert.rejects(() => service.addWorkspaceAdvisor({ name: 'x', model: 'm' }), /provider/)
 })
 
 test('buildWorkspaceAdvisor: blank vs preset, scoped to the workspace', () => {
@@ -1174,8 +1174,8 @@ test('auto-retry re-runs a failed advisor review after the delay and delivers', 
   runtime.enqueueReview(false)
   await new Promise(resolve => setTimeout(resolve, 150))
   assert.equal(llm.calls.length, 2)
-  assert.equal(agent.injected.length, 1)
-  assert.match(agent.injected[0].text, /second try worked/)
+  assert.equal(agent.followups.length, 1)
+  assert.match(agent.followups[0].text, /second try worked/)
   runtime.dispose()
 })
 
@@ -1232,8 +1232,8 @@ test('auto-retry cap 0 retries without bound until the review succeeds', async (
   runtime.enqueueReview(false)
   await new Promise(resolve => setTimeout(resolve, 400))
   assert.equal(llm.calls.length, 6)
-  assert.equal(agent.injected.length, 1)
-  assert.match(agent.injected[0].text, /finally made it/)
+  assert.equal(agent.followups.length, 1)
+  assert.match(agent.followups[0].text, /finally made it/)
   runtime.dispose()
 })
 
@@ -1254,8 +1254,8 @@ test('context overflow resets the advisor conversation and recovers on the next 
   await new Promise(resolve => setTimeout(resolve, 250))
   // overflow attempt + one recovery attempt after the conversation reset
   assert.equal(llm.calls.length, 2)
-  assert.equal(agent.injected.length, 1)
-  assert.match(agent.injected[0].text, /recovered after context reset/)
+  assert.equal(agent.followups.length, 1)
+  assert.match(agent.followups[0].text, /recovered after context reset/)
   runtime.dispose()
 })
 
@@ -1308,8 +1308,8 @@ test('resume revives a context-overflow-halted advisor and it reviews again', as
   events.push({ type: 'user/message', data: { content: [{ type: 'text', text: 'more work after resume' }] } })
   runtime.enqueueReview(false)
   await new Promise(resolve => setTimeout(resolve, 150))
-  assert.equal(agent.injected.length, 1)
-  assert.match(agent.injected[0].text, /back after reset/)
+  assert.equal(agent.followups.length, 1)
+  assert.match(agent.followups[0].text, /back after reset/)
   runtime.dispose()
 })
 
@@ -1573,7 +1573,6 @@ test('inject skill mode keeps full bodies and withholds load_skill', async () =>
 function mockHostCtx({ raw, llm, agents }) {
   const handlers = {}
   let current = raw
-  const watchers = []
   return {
     emit(event, ...args) {
       for (const handler of handlers[event] ?? []) handler(...args)
@@ -1581,33 +1580,25 @@ function mockHostCtx({ raw, llm, agents }) {
     on(event, handler) {
       ;(handlers[event] ??= []).push(handler)
     },
+    /** Registered listeners for one event, for waterfall-style tests. */
+    handlersFor(event) {
+      return handlers[event] ?? []
+    },
+    // DSH 0.2 settings shape: a Loader entry's Config IS the settings value
+    // (resolved + defaulted before `apply`), and writes go through the profile
+    // settings service. Pass `ctx.config` as the service's config argument.
+    get config() {
+      return current
+    },
     settings: {
-      register(_namespace, _schema, options) {
-        return {
-          // DSH scopes store the value; `validate` is a pure validator that
-          // throws on bad input and returns nothing — get() yields the raw value.
-          get: () => current,
-          watch(cb) {
-            watchers.push(cb)
-            return () => {
-              const i = watchers.indexOf(cb)
-              if (i >= 0) watchers.splice(i, 1)
-            }
-          },
-          update(patch) {
-            const prev = current
-            current = { ...current, ...patch }
-            options?.validate?.(current)
-            // Real DSH scopes notify watchers after a successful update.
-            for (const cb of [...watchers]) cb(current, prev)
-          }
-        }
+      async update(_namespace, patch) {
+        current = { ...current, ...patch }
       }
     },
     agents: { get: id => agents.get(id) },
     llm,
     connection: null, // skip RPC registration in tests
-    logger: { debug() {} }
+    logger: { debug() {}, warn() {} }
   }
 }
 
@@ -1657,7 +1648,7 @@ test('service end-to-end: turn/end review reaches the primary agent as a steered
     ]
   ])
   const ctx = mockHostCtx({ raw: serviceBaseRaw, llm, agents: new Map([['s1', agent]]) })
-  const service = new AdvisorService(ctx, {})
+  const service = new AdvisorService(ctx, ctx.config)
   const session = { id: 's1', header: { cwd: '/tmp/ws' }, events }
 
   ctx.emit('session/created', session)
@@ -1696,7 +1687,7 @@ test('service end-to-end: workspace-scoped advisor stays out of non-matching ses
     advisors: [{ ...serviceBaseRaw.advisors[0], workspaces: ['somewhere-else'] }]
   }
   const ctx = mockHostCtx({ raw, llm, agents: new Map([['s1', agent]]) })
-  const service = new AdvisorService(ctx, {})
+  const service = new AdvisorService(ctx, ctx.config)
   const session = { id: 's1', header: { cwd: '/tmp/ws' }, events }
   ctx.emit('session/created', session)
   ctx.emit('session/event', session, { type: 'turn/end', data: { reason: { kind: 'completed' } } })
@@ -1711,7 +1702,7 @@ test('service end-to-end: failed primary turn receives the auto-continue followu
   const llm = scriptedLlm([])
   const raw = { ...serviceBaseRaw, autoRetry: true, autoRetryDelayMs: 1000, autoRetryMax: 3 }
   const ctx = mockHostCtx({ raw, llm, agents: new Map([['s1', agent]]) })
-  const service = new AdvisorService(ctx, {})
+  const service = new AdvisorService(ctx, ctx.config)
   const session = { id: 's1', header: { cwd: '/tmp/ws' }, events }
   ctx.emit('session/created', session)
   // Shorten the retry delay before the failing turn fires (settings clamp >= 1000ms).
@@ -2116,7 +2107,7 @@ test('service end-to-end: turn/end creates a restore point when enabled', SKIP_N
     const llm = scriptedLlm([[{ type: 'text', text: 'ok' }]])
     const raw = { ...serviceBaseRaw, restorePoints: true, restorePointKeep: 5 }
     const ctx = mockHostCtx({ raw, llm, agents: new Map([['s1', agent]]) })
-    const service = new AdvisorService(ctx, {})
+    const service = new AdvisorService(ctx, ctx.config)
     const session = { id: 's1', header: { cwd: dir }, events }
 
     writeFileSync(join(dir, 'work.txt'), 'progress\n')
@@ -2142,7 +2133,7 @@ test('service: pre-mutation listener snapshots then always calls next', SKIP_NO_
     const llm = scriptedLlm([])
     const raw = { ...serviceBaseRaw, restorePoints: true }
     const ctx = mockHostCtx({ raw, llm, agents: new Map([['s1', agent]]) })
-    const service = new AdvisorService(ctx, {})
+    const service = new AdvisorService(ctx, ctx.config)
     const session = { id: 's1', header: { cwd: dir }, events }
     ctx.emit('session/created', session)
 
@@ -2159,8 +2150,8 @@ test('service: pre-mutation listener snapshots then always calls next', SKIP_NO_
     assert.match(refs, /refs\/dsh-omp-advisor\/restore\/s1\//)
 
     // Restore points disabled => no snapshot, next still called. Driven
-    // through the settings scope update (watchers now fire in the mock).
-    service['settingsScope'].update({ restorePoints: false })
+    // through the service write path (0.2 has no scope watcher to fire).
+    await service.updateSettings({ restorePoints: false })
     service['lastMutationSnapshot'].clear()
     const refsBefore = gitOut(dir, "git for-each-ref '--format=%(refname)'")
     let nextAgain = false
@@ -2179,7 +2170,7 @@ test('service: pre-mutation listener snapshots then always calls next', SKIP_NO_
 
 test('service event ring: bounded, newest-first, detail clipped', () => {
   const ctx = mockHostCtx({ raw: serviceBaseRaw })
-  const service = new AdvisorService(ctx, {})
+  const service = new AdvisorService(ctx, ctx.config)
   for (let i = 0; i < 130; i++) {
     service.recordEvent('review-done', { advisor: `a${i}`, detail: 'x'.repeat(300) })
   }
@@ -2200,7 +2191,7 @@ test('service knownWorkspaces: union of session cwds and advisor patterns, sorte
     ]
   }
   const ctx = mockHostCtx({ raw })
-  const service = new AdvisorService(ctx, {})
+  const service = new AdvisorService(ctx, ctx.config)
   ctx.emit('session/created', { id: 's1', header: { cwd: '/home/u/alpha' }, events: [] })
   ctx.emit('session/created', { id: 's2', header: { cwd: '/home/u/alpha' }, events: [] })
   assert.deepEqual(service.knownWorkspaces(), ['/home/u/alpha', '/home/u/zeta', 'shared'])
@@ -2213,7 +2204,7 @@ test('service e2e: attach/review-done/advice events land in the ring', async () 
     [{ type: 'tool-call', id: 'c1', name: 'advise', arguments: JSON.stringify({ note: 'looks fine', severity: 'nit' }) }]
   ])
   const ctx = mockHostCtx({ raw: serviceBaseRaw, llm, agents: new Map([['s1', agent]]) })
-  const service = new AdvisorService(ctx, {})
+  const service = new AdvisorService(ctx, ctx.config)
   const session = { id: 's1', header: { cwd: '/tmp/ws' }, events }
   ctx.emit('session/created', session)
   ctx.emit('session/event', session, { type: 'turn/end', data: { reason: { kind: 'completed' } } })
@@ -2235,7 +2226,7 @@ test('service e2e: review failure records review-failed + retry events', async (
   const llm = { stream: () => { throw new Error('503 gateway overloaded') } }
   const raw = { ...serviceBaseRaw, autoRetry: true, autoRetryDelayMs: 1000, autoRetryMax: 2 }
   const ctx = mockHostCtx({ raw, llm, agents: new Map([['s1', agent]]) })
-  const service = new AdvisorService(ctx, {})
+  const service = new AdvisorService(ctx, ctx.config)
   const session = { id: 's1', header: { cwd: '/tmp/ws' }, events }
   ctx.emit('session/created', session)
   ctx.emit('session/event', session, { type: 'turn/end', data: { reason: { kind: 'completed' } } })
@@ -2388,7 +2379,7 @@ test('service snapshot: session title from session/title events + cwd identity',
   const agent = serviceAgent(events)
   const llm = scriptedLlm([])
   const ctx = mockHostCtx({ raw: serviceBaseRaw, llm, agents: new Map([['s1', agent]]) })
-  const service = new AdvisorService(ctx, {})
+  const service = new AdvisorService(ctx, ctx.config)
   const session = { id: 's1', header: { cwd: '/tmp/ws' }, events }
   ctx.emit('session/created', session)
   // Title arrives as a session event (DSH session-title service appends it).
@@ -2403,7 +2394,7 @@ test('service snapshot: session title from session/title events + cwd identity',
 
 test('service snapshot: pre-existing title in the session log folds in on attach', () => {
   const ctx = mockHostCtx({ raw: serviceBaseRaw })
-  const service = new AdvisorService(ctx, {})
+  const service = new AdvisorService(ctx, ctx.config)
   const session = {
     id: 's2',
     header: { cwd: '/tmp/other' },
@@ -2750,4 +2741,207 @@ test('resolvePackageScript: finds real profile scripts or returns undefined clea
   if (hs !== undefined) assert.ok(hs.endsWith('mcp-server.js'))
   assert.equal(resolvePackageScript('definitely-not-a-real-pkg/x.js'), undefined)
   assert.equal(resolvePackageScript(''), undefined)
+})
+
+/* --------------------- v0.9.0: tool-call interception (gate) --------------------- */
+
+const gateBaseRaw = {
+  ...serviceBaseRaw,
+  toolGate: {
+    enabled: true,
+    mode: 'deny',
+    tools: [],
+    severities: ['blocker'],
+    maxDenials: 2,
+    note: 'Address the finding or explain why it is wrong.'
+  }
+}
+
+/**
+ * Build a service with the tool gate configured, plus an `arm` helper that feeds
+ * a finding through the runtime's `deliver` — the single funnel every accepted
+ * advisory (advise tool and review results alike) passes through, so arming this
+ * way exercises the same path production advice takes.
+ */
+function makeGateService(overrides = {}) {
+  const raw = { ...gateBaseRaw, toolGate: { ...gateBaseRaw.toolGate, ...overrides } }
+  const events = []
+  const agent = serviceAgent(events)
+  const ctx = mockHostCtx({ raw, agents: new Map([['s1', agent]]) })
+  const service = new AdvisorService(ctx, ctx.config)
+  const session = { id: 's1', header: { cwd: '/tmp' }, events }
+  ctx.emit('session/created', session)
+  const runtime = service['runtimes'].get('s1')
+  return {
+    service,
+    ctx,
+    session,
+    agent,
+    runtime,
+    arm: (note, severity) => runtime['deliver'](note, severity, 'sentinel'),
+    exec: name => ({ name, agent: { session } })
+  }
+}
+
+/**
+ * Drive the plugin's `tools/pre-execute` waterfall the way the host does. This
+ * plugin registers exactly one listener for that event, so the test invokes it
+ * directly with a `next` that emulates the rest of the chain (allow) and reports
+ * whether the chain was reached.
+ */
+async function preExecute(ctx, exec) {
+  const handlers = ctx.handlersFor('tools/pre-execute')
+  assert.equal(handlers.length, 1, 'expected exactly one tools/pre-execute listener')
+  let nextCalls = 0
+  const decision = await handlers[0](exec, () => {
+    nextCalls++
+    return { kind: 'allow' }
+  })
+  return { decision, nextCalls }
+}
+
+test('tool gate: denies a gated call while a blocker is unresolved', async () => {
+  const g = makeGateService()
+  g.arm('this drops the table', 'blocker')
+  const { decision, nextCalls } = await preExecute(g.ctx, g.exec('bash'))
+  assert.equal(nextCalls, 0, 'the tool body chain is never continued')
+  assert.equal(decision.kind, 'deny')
+  assert.equal(decision.info.name, 'AdvisorToolGateDenied')
+  assert.equal(decision.info.code, 'ADVISOR_TOOL_GATE')
+  assert.match(decision.reason, /sentinel/)
+  assert.match(decision.reason, /blocker/)
+  assert.match(decision.reason, /this drops the table/)
+  assert.match(decision.reason, /Address the finding/, 'the configured note is appended')
+})
+
+test('tool gate: one finding stops a bounded number of calls, then stands down', async () => {
+  const g = makeGateService({ maxDenials: 2 })
+  g.arm('unsafe migration', 'blocker')
+  assert.equal((await preExecute(g.ctx, g.exec('write'))).decision.kind, 'deny')
+  assert.equal((await preExecute(g.ctx, g.exec('write'))).decision.kind, 'deny')
+  const third = await preExecute(g.ctx, g.exec('write'))
+  assert.equal(third.nextCalls, 1, 'the gate stands down once the bound is spent')
+  assert.equal(third.decision.kind, 'allow')
+  assert.ok(
+    g.service.recentEvents().some(event => event.kind === 'gate-stood-down'),
+    'the stand-down is recorded once'
+  )
+})
+
+test('tool gate: a new finding re-arms the gate and resets the bound', async () => {
+  const g = makeGateService({ maxDenials: 1 })
+  g.arm('first problem', 'blocker')
+  assert.equal((await preExecute(g.ctx, g.exec('bash'))).decision.kind, 'deny')
+  assert.equal((await preExecute(g.ctx, g.exec('bash'))).nextCalls, 1, 'bound reached')
+  g.arm('second problem', 'blocker')
+  const rearmed = await preExecute(g.ctx, g.exec('bash'))
+  assert.equal(rearmed.decision.kind, 'deny', 'a fresh finding re-arms the gate')
+  assert.match(rearmed.decision.reason, /second problem/)
+})
+
+test('tool gate: ask mode holds the call for the user with a localized prompt', async () => {
+  const g = makeGateService({ mode: 'ask' })
+  g.arm('needs a second opinion', 'blocker')
+  const { decision, nextCalls } = await preExecute(g.ctx, g.exec('edit'))
+  assert.equal(nextCalls, 0, 'ask also ends the waterfall')
+  assert.equal(decision.kind, 'ask')
+  assert.match(decision.displayReason.en, /sentinel/)
+  assert.match(decision.displayReason.en, /edit/)
+  assert.match(decision.displayReason.zh, /顾问/)
+  assert.ok(g.service.recentEvents().some(event => event.kind === 'gate-ask'))
+})
+
+test('tool gate: disabled, ungated tools, and non-gating severities pass through', async () => {
+  const off = makeGateService({ enabled: false })
+  off.arm('boom', 'blocker')
+  assert.equal((await preExecute(off.ctx, off.exec('bash'))).nextCalls, 1, 'disabled gate never interferes')
+
+  const scoped = makeGateService({ tools: ['bash'] })
+  scoped.arm('boom', 'blocker')
+  assert.equal((await preExecute(scoped.ctx, scoped.exec('write'))).nextCalls, 1, 'not in the gated set')
+  assert.equal((await preExecute(scoped.ctx, scoped.exec('bash'))).decision.kind, 'deny')
+
+  const concernOnly = makeGateService({ severities: ['concern'] })
+  concernOnly.arm('a nit', 'nit')
+  assert.equal((await preExecute(concernOnly.ctx, concernOnly.exec('bash'))).nextCalls, 1, 'nit is not gating')
+  concernOnly.arm('a real concern', 'concern')
+  assert.equal((await preExecute(concernOnly.ctx, concernOnly.exec('bash'))).decision.kind, 'deny')
+})
+
+test('tool gate: an unbounded gate (maxDenials 0) keeps refusing the finding', async () => {
+  const g = makeGateService({ maxDenials: 0 })
+  g.arm('hard stop', 'blocker')
+  for (let i = 0; i < 4; i++) {
+    assert.equal((await preExecute(g.ctx, g.exec('bash'))).decision.kind, 'deny', `refusal ${i + 1}`)
+  }
+  assert.equal(g.service.gateBlock('s1').denials, 4)
+})
+
+test('tool gate: clearing the finding releases gated calls', async () => {
+  const g = makeGateService()
+  g.arm('boom', 'blocker')
+  assert.equal(g.service.gateBlock('s1').severity, 'blocker')
+  assert.equal(g.service.clearToolGate('s1'), 1)
+  assert.equal(g.service.gateBlock('s1'), undefined)
+  assert.equal((await preExecute(g.ctx, g.exec('bash'))).nextCalls, 1, 'released')
+  assert.equal(g.service.clearToolGate('s1'), 0, 'nothing left to clear')
+})
+
+test('tool gate: the session snapshot exposes the armed finding and its refusal count', async () => {
+  const g = makeGateService()
+  assert.equal(g.service.snapshot('s1').toolGate, undefined, 'no finding, nothing surfaced')
+  g.arm('boom', 'blocker')
+  const armed = g.service.snapshot('s1').toolGate
+  assert.equal(armed.severity, 'blocker')
+  assert.equal(armed.advisor, 'sentinel')
+  assert.equal(armed.note, 'boom')
+  assert.equal(armed.maxDenials, 2)
+  assert.equal(armed.denials, 0)
+  await preExecute(g.ctx, g.exec('bash'))
+  assert.equal(g.service.snapshot('s1').toolGate.denials, 1, 'refusals are counted')
+})
+
+test('tool gate settings: normalization applies defaults and drops junk', () => {
+  const defaults = normalizeSettings({ ...serviceBaseRaw, toolGate: {} })
+  assert.deepEqual(defaults.toolGate, {
+    enabled: false,
+    mode: 'deny',
+    tools: [],
+    severities: ['blocker'],
+    maxDenials: 2,
+    note: ''
+  })
+
+  const absent = normalizeSettings({ ...serviceBaseRaw })
+  assert.equal(absent.toolGate.enabled, false, 'an absent policy is a disabled gate')
+
+  const tuned = normalizeSettings({
+    ...serviceBaseRaw,
+    toolGate: {
+      enabled: true,
+      mode: 'ask',
+      tools: ['bash', '  ', 'edit'],
+      severities: [],
+      maxDenials: 99,
+      note: '  hi  ',
+      bogus: 'dropped'
+    }
+  })
+  assert.deepEqual(tuned.toolGate, {
+    enabled: true,
+    mode: 'ask',
+    tools: ['bash', 'edit'],
+    severities: ['blocker'],
+    maxDenials: 20,
+    note: 'hi'
+  })
+
+  // A partial edit must not silently disable a configured gate's other fields.
+  const partial = normalizeSettingsLenient({
+    ...serviceBaseRaw,
+    toolGate: { enabled: true, tools: ['bash'] }
+  })
+  assert.equal(partial.toolGate.enabled, true)
+  assert.deepEqual(partial.toolGate.tools, ['bash'])
+  assert.equal(partial.toolGate.mode, 'deny', 'unset mode falls back to deny')
 })

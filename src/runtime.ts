@@ -19,7 +19,9 @@ import type {
   AdvisorStatusView,
   AgentLike,
   LlmLike,
-  SessionEvent
+  SessionEvent,
+  ToolGateBlock,
+  ToolGateSettings
 } from './types'
 
 /** Consecutive failures tolerated before the backlog is dropped. */
@@ -132,6 +134,21 @@ export class SessionAdvisorRuntime {
   private autoRetryMax = 3
   /** Escalation: blocker raised mid-run cancels the step (opt-in). */
   private interveneOnBlocker = false
+  /** Tool-call gate policy (v0.9.0); the service evaluates it per tool call. */
+  private toolGate: ToolGateSettings = {
+    enabled: false,
+    mode: 'deny',
+    tools: [],
+    severities: ['blocker'],
+    maxDenials: 2,
+    note: ''
+  }
+  /**
+   * The finding currently arming the tool gate. Armed by `deliver` when an
+   * advisor reports a gating severity, cleared by the user (RPC) or when the
+   * session's runtimes are rebuilt away.
+   */
+  private gate?: { advisor: string; severity: AdvisorSeverity; note: string; denials: number }
   /** Skip reviews whose rendered delta is smaller than this (chars; 0 = off). */
   private minDeltaChars = 0
   /** Primary-model failure episode state (resets on a completed turn). */
@@ -159,6 +176,7 @@ export class SessionAdvisorRuntime {
     const maxRaw = Number.isFinite(settings.autoRetryMax) ? settings.autoRetryMax : 3
     this.autoRetryMax = Math.min(999, Math.max(0, Math.round(maxRaw)))
     this.interveneOnBlocker = settings.interveneOnBlocker === true
+    this.toolGate = settings.toolGate ?? this.toolGate
     this.minDeltaChars = Math.min(100000, Math.max(0, Math.round(settings.minDeltaChars || 0)))
     const memoryEnabled = settings.memory?.enabled !== false
     const next = new Map<string, AdvisorSlot>()
@@ -404,10 +422,52 @@ export class SessionAdvisorRuntime {
    * coalesce window and emitted as one batched message; an interrupting note
    * flushes the whole batch immediately so a blocker never waits.
    */
+  /**
+   * The finding currently arming the tool gate, or undefined when this session
+   * has none, the reported severity is not a gating one, or the user already
+   * cleared it. The caller (service) decides whether the gate is enabled for the
+   * tool being called and whether the denial bound has been reached.
+   */
+  gateBlock(): ToolGateBlock | undefined {
+    if (this.disposed || !this.gate) return undefined
+    if (!this.toolGate.severities.includes(this.gate.severity)) return undefined
+    return {
+      sessionId: this.host.sessionId,
+      advisor: this.gate.advisor,
+      severity: this.gate.severity,
+      note: this.gate.note,
+      denials: this.gate.denials,
+      maxDenials: this.toolGate.maxDenials
+    }
+  }
+
+  /** Count one call stopped by the current finding (called before refusing it). */
+  recordGateDenial(): void {
+    if (this.gate) this.gate.denials++
+  }
+
+  /** Clear the armed finding — the user acknowledged it, or work moved on. */
+  clearGate(): boolean {
+    if (!this.gate) return false
+    this.gate = undefined
+    return true
+  }
+
+  /**
+   * Arm the gate from an accepted finding. A new finding replaces the previous
+   * one and resets its denial count, so the bound is per-finding rather than per
+   * session — an advisor that keeps raising fresh blockers keeps its veto.
+   */
+  private armGate(advisorName: string, severity: AdvisorSeverity | undefined, note: string): void {
+    if (!severity || !this.toolGate.severities.includes(severity)) return
+    this.gate = { advisor: advisorName, severity, note, denials: 0 }
+  }
+
   private deliver(note: string, severity: AdvisorSeverity | undefined, advisorName: string, meta?: AdvisorNote['meta']): void {
     const advisorNote: AdvisorNote = { note, severity, advisor: advisorName, ...(meta ? { meta } : {}) }
     this.recentNotes.push(advisorNote)
     if (this.recentNotes.length > RECENT_NOTES_LIMIT) this.recentNotes.shift()
+    this.armGate(advisorName, severity, note)
 
     const slot = this.slots.get(advisorName)
     if (slot) slot.adviceDelivered++
@@ -485,6 +545,7 @@ export class SessionAdvisorRuntime {
 
     const steerNotes: AdvisorNote[] = []
     const injectNotes: AdvisorNote[] = []
+    const followupNotes: AdvisorNote[] = []
     for (const advisorNote of notes) {
       const channel = resolveDeliveryChannel({
         severity: advisorNote.severity,
@@ -492,7 +553,12 @@ export class SessionAdvisorRuntime {
         primaryRunning
       })
       if (channel === 'steer') steerNotes.push(advisorNote)
+      else if (channel === 'followup') followupNotes.push(advisorNote)
       else injectNotes.push(advisorNote)
+    }
+    if (followupNotes.length > 0) {
+      // The primary is idle: only `followup` wakes the driver.
+      agent.followup(this.createUserMessage(formatAdvisorBatchContent(followupNotes)))
     }
     if (injectNotes.length > 0) {
       agent.inject(this.createUserMessage(formatAdvisorBatchContent(injectNotes)))
@@ -505,13 +571,14 @@ export class SessionAdvisorRuntime {
       count: notes.length,
       injected: injectNotes.length,
       steered: steerNotes.length,
+      followedUp: followupNotes.length,
       coalesced: notes.length > 1
     })
     for (const advisorNote of notes) {
       this.host.recordEvent?.(
         'advice',
         advisorNote.advisor,
-        `${advisorNote.severity ?? 'nit'} · ${steerNotes.includes(advisorNote) ? 'steer' : 'inject'}`
+        `${advisorNote.severity ?? 'nit'} · ${steerNotes.includes(advisorNote) ? 'steer' : followupNotes.includes(advisorNote) ? 'followup' : 'inject'}`
       )
     }
   }
@@ -634,6 +701,8 @@ export class SessionAdvisorRuntime {
     }
     for (const timer of this.retryTimers) clearTimeout(timer)
     this.retryTimers.clear()
+    // A disposed session must not keep a live veto over tool calls.
+    this.gate = undefined
     // Buffered notes are dropped: a disposed session must not receive advice.
     this.pendingNotes = []
     for (const slot of this.slots.values()) {
