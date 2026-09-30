@@ -1,7 +1,7 @@
 /** Unit tests for the dsh-omp-advisor core semantics. */
 import assert from 'node:assert/strict'
 import { execSync } from 'node:child_process'
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
@@ -60,6 +60,24 @@ import {
   MemoryManager,
   buildStoreArgs
 } from './.bundle.mjs'
+
+/* ---------------------------- seat stacking layer --------------------------- */
+
+test('the model-seat panel stacks above the settings Modal, below Tooltip/Toast', () => {
+  // The panel is portalled to document.body, so it competes in the ROOT stacking
+  // context and its z-index is judged against the host's layers, not against its
+  // trigger's ancestors. The host puts Modal (and the settings surface that hosts
+  // the advisor's picker) at 1000, and Tooltip/Toast at 1100. A value below 1000
+  // paints the list UNDER the settings dialog however late it mounts — the bug
+  // this guards. This reads the source because the honest alternative, rendering
+  // the seat and reading computed styles, needs a real browser.
+  const source = readFileSync(new URL('../src/client/model-select.ts', import.meta.url), 'utf8')
+  const match = /\.dsh-ms-panel\{[^}]*z-index:(\d+)/.exec(source)
+  assert.ok(match, 'the .dsh-ms-panel rule must declare a z-index')
+  const z = Number(match[1])
+  assert.ok(z > 1000, `panel z-index ${z} must clear the settings Modal layer (1000)`)
+  assert.ok(z < 1100, `panel z-index ${z} must stay below Tooltip/Toast (1100)`)
+})
 
 /* ------------------------- model-seat projection ---------------------------- */
 

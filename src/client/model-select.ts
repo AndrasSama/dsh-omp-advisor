@@ -64,6 +64,22 @@ const zh = {
  * surface carries its own, keyed by the platform's data-plugin-css tag
  * convention. Colours ride the app's own theme tokens with a neutral
  * fallback, so light and dark themes both read correctly.
+ *
+ * Stacking: the panel is portalled to document.body, so it competes in the
+ * ROOT stacking context and its z-index is judged against the host's layers
+ * rather than against its trigger's ancestors. The host's layers are:
+ *
+ *     100   menus and other in-flow popovers
+ *    1000   Modal, including the settings surface that hosts this seat
+ *    1100   Tooltip and Toast
+ *
+ * The seat renders in two homes: the composer (where anything above 100 is
+ * fine) and an advisor card inside the settings Modal. A panel below 1000 is
+ * painted UNDER that Modal however late it mounts — which is exactly what a
+ * value of 90 did, leaving the list unreadable precisely where a long model
+ * list needs the picker most. 1050 clears every surface that can contain the
+ * trigger while staying below Tooltip and Toast, which must never be occluded
+ * by a picker.
  * ------------------------------------------------------------------ */
 
 const CSS_ID = "dsh-model-search/ModelSearch.module.css";
@@ -76,7 +92,7 @@ const CSS = [
 	".dsh-ms-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}",
 	".dsh-ms-effort{opacity:.6;white-space:nowrap}",
 	".dsh-ms-caret{font-size:10px;opacity:.6}",
-	".dsh-ms-panel{position:fixed;z-index:90;display:flex;flex-direction:column;border:1px solid color-mix(in srgb,currentColor 16%,transparent);border-radius:12px;background:var(--dsw-alias-bg-layer-2,var(--dsw-alias-bg-layer-1,#1c1c20));box-shadow:0 12px 32px rgba(0,0,0,.35);overflow:hidden}",
+	".dsh-ms-panel{position:fixed;z-index:1050;display:flex;flex-direction:column;border:1px solid color-mix(in srgb,currentColor 16%,transparent);border-radius:12px;background:var(--dsw-alias-bg-layer-2,var(--dsw-alias-bg-layer-1,#1c1c20));box-shadow:0 12px 32px rgba(0,0,0,.35);overflow:hidden}",
 	".dsh-ms-search{display:flex;align-items:center;gap:8px;padding:8px 10px;border-bottom:1px solid color-mix(in srgb,currentColor 12%,transparent)}",
 	".dsh-ms-input{flex:1;min-width:0;height:26px;border:0;background:transparent;color:inherit;font:inherit;font-size:13px;outline:none}",
 	".dsh-ms-input::placeholder{color:inherit;opacity:.45}",

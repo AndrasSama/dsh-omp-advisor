@@ -6,6 +6,25 @@ v0.9.0; earlier releases are described in the git log and the README.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.1] — 2026-09-30
+
+### Fixed
+
+- **The model picker opened *behind* the settings dialog.** The panel is portalled
+  to `document.body`, so it competes in the root stacking context and its `z-index`
+  is judged against the host's layers rather than against its trigger's ancestors.
+  It was `90`; the host puts `Modal` — including the settings surface that hosts the
+  advisor cards — at `1000`. The list was therefore painted under the dialog however
+  late it mounted, which is exactly where a 460-model list needs it most.
+
+  It is now `1050`: above every surface that can contain the trigger, and still below
+  `Tooltip` and `Toast` at `1100`, which must never be occluded by a picker. The
+  layer table is recorded next to the rule so the value is not re-guessed.
+
+  Guarded by a test asserting the panel sits strictly between `1000` and `1100`, so a
+  future edit cannot quietly reintroduce an unreadable picker. Verified by mutation:
+  restoring `90` fails the guard, and overshooting past `1100` fails it too.
+
 ## [0.10.0] — 2026-09-30
 
 Two surfaces get the searchable model picker, and the settings UI is reorganised.
