@@ -143,6 +143,21 @@ interface ClientCtx {
 }
 
 /* ---------------------------------- styles ---------------------------------- */
+/*
+ * One small set of layout constants shared by every tab below, so label width,
+ * row gap, heading rhythm, hint styling, and card shape stay consistent instead
+ * of repeating ad-hoc inline values. Colors keep riding DSH CSS custom
+ * properties (with neutral fallbacks) — no hardcoded palette, correct in both
+ * the light and the dark theme. Status/event colors live in their own semantic
+ * maps (STATUS_COLORS / EVENT_KIND_COLORS).
+ */
+
+/** Gap between rows inside a group. */
+const ROW_GAP = 8
+/** Gap between groups inside a tab card. */
+const GROUP_GAP = 14
+/** Width of the label column on a settings row. */
+const LABEL_WIDTH = 150
 
 const styles: Record<string, React.CSSProperties> = {
   root: { display: 'flex', flexDirection: 'column', gap: 16, fontSize: 13 },
@@ -152,10 +167,28 @@ const styles: Record<string, React.CSSProperties> = {
     padding: 14,
     display: 'flex',
     flexDirection: 'column',
-    gap: 10
+    gap: GROUP_GAP
+  },
+  /* A titled group inside a card: heading + rows (the General tab sections). */
+  group: { display: 'flex', flexDirection: 'column', gap: ROW_GAP },
+  groupHeading: {
+    borderTop: '1px solid var(--dsh-border, rgba(128,128,128,0.2))',
+    paddingTop: 10,
+    display: 'flex',
+    alignItems: 'baseline',
+    gap: 10,
+    flexWrap: 'wrap'
+  },
+  groupHeadingFirst: { borderTop: 'none', paddingTop: 0 },
+  groupTitle: {
+    fontSize: 11,
+    fontWeight: 700,
+    letterSpacing: '0.07em',
+    textTransform: 'uppercase',
+    opacity: 0.7
   },
   row: { display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' },
-  label: { minWidth: 150, opacity: 0.85 },
+  label: { minWidth: LABEL_WIDTH, opacity: 0.85 },
   input: {
     background: 'var(--dsh-input-bg, rgba(128,128,128,0.08))',
     border: '1px solid var(--dsh-border, rgba(128,128,128,0.25))',
@@ -204,6 +237,17 @@ const styles: Record<string, React.CSSProperties> = {
     marginLeft: 2
   },
   hint: { opacity: 0.6, fontSize: 12 },
+  /* Secondary row label — hint-toned, same column width as `label`. */
+  subLabel: { minWidth: LABEL_WIDTH, opacity: 0.6, fontSize: 12 },
+  /* A quiet dashed box for empty states and grouped secondary hints. */
+  quietBox: {
+    border: '1px dashed var(--dsh-border, rgba(128,128,128,0.3))',
+    borderRadius: 8,
+    padding: '8px 10px',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 6
+  },
   chip: {
     display: 'inline-flex',
     alignItems: 'center',
@@ -300,6 +344,7 @@ function WorkspacesInput(props: { value: string[]; onCommit(next: string[]): voi
     <input
       style={{ ...styles.input, flex: 1, minWidth: 220 }}
       placeholder="all workspaces (empty) — or patterns like: Qwest Chain, /home/sama/novels"
+      aria-label="Advisor workspace patterns"
       value={text}
       onChange={event => setText(event.target.value)}
       onBlur={commit}
@@ -307,6 +352,26 @@ function WorkspacesInput(props: { value: string[]; onCommit(next: string[]): voi
         if (event.key === 'Enter') commit()
       }}
     />
+  )
+}
+
+/* A titled group inside a tab card: small uppercase heading + its rows. Pure
+ * presentation — used by the General tab so a setting can be found by section
+ * instead of scanned. */
+function SettingsGroup(props: {
+  title: string
+  hint?: string
+  first?: boolean
+  children: React.ReactNode
+}): React.ReactElement {
+  return (
+    <div style={styles.group}>
+      <div style={{ ...styles.groupHeading, ...(props.first ? styles.groupHeadingFirst : {}) }}>
+        <span style={styles.groupTitle}>{props.title}</span>
+        {props.hint && <span style={styles.hint}>{props.hint}</span>}
+      </div>
+      {props.children}
+    </div>
   )
 }
 
@@ -353,6 +418,7 @@ const AdvisorCard = React.memo(function AdvisorCard({
   const skills = entry.skills ?? []
   const preset = entry.preset ? findPreset(entry.preset) : undefined
   const incomplete = !entry.provider || !entry.model
+  const disabled = entry.enabled === false
   const workspaceCount = entry.workspaces?.length ?? 0
 
   const providerOptions = useMemo(
@@ -406,13 +472,26 @@ const AdvisorCard = React.memo(function AdvisorCard({
       }}
     >
       {/* Header: always visible. Click anywhere on it (except the controls)
-          to expand/collapse; cards are collapsed by default. */}
+          to expand/collapse; cards are collapsed by default. The collapsed
+          header carries the state a user needs at a glance: name, model,
+          enabled/disabled, scope, skills. */}
       <div
         style={styles.cardHeader}
         onClick={() => onToggleCollapse(index)}
         title={collapsed ? 'Expand this advisor' : 'Collapse this advisor'}
       >
-        <button style={styles.chevron} tabIndex={-1}>
+        <button
+          type="button"
+          style={styles.chevron}
+          aria-expanded={!collapsed}
+          aria-label={
+            collapsed ? `Expand advisor ${entry.name || index + 1}` : `Collapse advisor ${entry.name || index + 1}`
+          }
+          onClick={event => {
+            event.stopPropagation()
+            onToggleCollapse(index)
+          }}
+        >
           {collapsed ? '▸' : '▾'}
         </button>
         <input
@@ -420,22 +499,35 @@ const AdvisorCard = React.memo(function AdvisorCard({
           checked={entry.enabled !== false}
           onChange={event => onPatch(index, { enabled: event.target.checked })}
           onClick={event => event.stopPropagation()}
+          aria-label={`Enable advisor ${entry.name || index + 1}`}
           title="Enable this advisor"
         />
         <input
-          style={{ ...styles.input, width: 160 }}
+          style={{ ...styles.input, width: 160, ...(disabled ? { opacity: 0.5 } : {}) }}
           value={entry.name}
           placeholder="advisor name"
+          aria-label={`Advisor ${index + 1} name`}
           onClick={event => event.stopPropagation()}
           onChange={event => onPatch(index, { name: event.target.value })}
         />
-        {collapsed && (
-          <span style={styles.hint}>
-            {incomplete
-              ? '— no model yet —'
-              : `${entry.provider} / ${model?.name || entry.model}`}
+        {disabled && (
+          <span style={styles.chip} title="This advisor is switched off globally (Advisors tab)">
+            disabled
           </span>
         )}
+        {collapsed &&
+          (incomplete ? (
+            <span
+              style={{ ...styles.hint, color: 'rgb(220,160,90)' }}
+              title="Pick a provider and model before this advisor can run"
+            >
+              — no model yet —
+            </span>
+          ) : (
+            <span style={styles.chip} title={`${entry.provider} / ${model?.name || entry.model}`}>
+              {entry.provider} · {model?.name || entry.model}
+            </span>
+          ))}
         <span style={styles.chip} title="Workspace patterns (empty = every session)">
           {workspaceCount === 0 ? 'all workspaces' : `${workspaceCount} workspace${workspaceCount > 1 ? 's' : ''}`}
         </span>
@@ -450,6 +542,7 @@ const AdvisorCard = React.memo(function AdvisorCard({
         <span style={{ flex: 1 }} />
         <button
           style={styles.dangerButton}
+          aria-label={`Remove advisor ${entry.name || index + 1}`}
           onClick={event => {
             event.stopPropagation()
             onRemove(index)
@@ -515,18 +608,19 @@ const AdvisorCard = React.memo(function AdvisorCard({
           <textarea
             style={styles.textarea}
             placeholder="Optional specialization, e.g. 'Focus on security: injection, secrets, unsafe deserialization.'"
+            aria-label="Specialization instructions"
             value={entry.instructions ?? ''}
             onChange={event => onPatch(index, { instructions: event.target.value })}
           />
           <div style={styles.row}>
-            <span style={{ ...styles.hint, minWidth: 150 }}>Workspaces</span>
+            <span style={styles.subLabel}>Workspaces</span>
             <WorkspacesInput
               value={entry.workspaces ?? []}
               onCommit={next => onPatch(index, { workspaces: next })}
             />
           </div>
           <div style={styles.row}>
-            <span style={{ ...styles.hint, minWidth: 150 }} />
+            <span style={styles.subLabel} />
             <span style={styles.hint}>
               Comma-separated patterns matched against the session's workspace path; this advisor only runs
               in matching sessions (empty = every session). A pattern is a SUBSTRING match — '/home/sama'
@@ -535,7 +629,7 @@ const AdvisorCard = React.memo(function AdvisorCard({
             </span>
           </div>
           <div style={styles.row}>
-            <span style={{ ...styles.hint, minWidth: 150 }}>Memory engines</span>
+            <span style={styles.subLabel}>Memory engines</span>
             {memoryEngines.length === 0 ? (
               <span style={styles.hint}>No engines probed yet — see the Memory tab.</span>
             ) : (
@@ -573,7 +667,7 @@ const AdvisorCard = React.memo(function AdvisorCard({
             )}
           </div>
           <div style={styles.row}>
-            <span style={{ ...styles.hint, minWidth: 150 }} />
+            <span style={styles.subLabel} />
             <span style={styles.hint}>
               Which long-term memory engines this advisor recalls from and writes to. None checked = the
               built-in plaintext store only. Engines grayed here are unavailable (see the Memory tab).
@@ -581,10 +675,11 @@ const AdvisorCard = React.memo(function AdvisorCard({
           </div>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
             <div style={styles.row}>
-              <span style={{ ...styles.hint, minWidth: 150 }}>Skills ({skills.length})</span>
+              <span style={styles.subLabel}>Skills ({skills.length})</span>
               <select
                 style={{ ...styles.select, maxWidth: 260 }}
                 value={entry.skillMode === 'lazy' ? 'lazy' : 'inject'}
+                aria-label="Skill delivery mode"
                 title="inject = embed full skill bodies in the system prompt; lazy = id+description index plus a load_skill tool (saves tokens, costs one extra call per loaded skill)"
                 onChange={event =>
                   onPatch(index, { skillMode: event.target.value === 'lazy' ? 'lazy' : 'inject' })
@@ -627,6 +722,7 @@ const AdvisorCard = React.memo(function AdvisorCard({
                           font: 'inherit',
                           lineHeight: 1
                         }}
+                        aria-label={`Remove skill ${skillId}`}
                         title="Remove this skill"
                         onClick={() => onPatch(index, { skills: skills.filter(id => id !== skillId) })}
                       >
@@ -640,6 +736,7 @@ const AdvisorCard = React.memo(function AdvisorCard({
             <select
               style={styles.select}
               value=""
+              aria-label="Add a packaged skill"
               onChange={event => {
                 if (event.target.value) {
                   onPatch(index, { skills: [...skills, event.target.value] })
@@ -716,9 +813,11 @@ function WorkspacesMatrix({ advisors, knownWorkspaces, onPatchAdvisor }: Workspa
       {advisors.length === 0 ? (
         <span style={styles.hint}>No advisors yet — add one in the Advisors tab first.</span>
       ) : rows.length === 0 ? (
-        <span style={styles.hint}>
-          No workspaces seen yet. Start a session in a workspace and it appears here, or add a pattern below.
-        </span>
+        <div style={styles.quietBox}>
+          <span style={styles.hint}>
+            No workspaces seen yet. Start a session in a workspace and it appears here, or add a pattern below.
+          </span>
+        </div>
       ) : (
         <div style={{ overflowX: 'auto' }}>
           <table style={{ borderCollapse: 'collapse', width: '100%', font: 'inherit' }}>
@@ -787,6 +886,7 @@ function WorkspacesMatrix({ advisors, knownWorkspaces, onPatchAdvisor }: Workspa
         <input
           style={{ ...styles.input, flex: 1, minWidth: 220 }}
           placeholder="Add a workspace pattern (path or substring, '=' = exact)…"
+          aria-label="Add a workspace pattern"
           value={draft}
           onChange={event => setDraft(event.target.value)}
           onKeyDown={event => {
@@ -1032,18 +1132,21 @@ function MemoryPanel({ memory, settingsMemory, write, onRescan, onApprove, onDis
               <input
                 style={{ ...styles.input, width: 140 }}
                 placeholder="engine id (kebab)"
+                aria-label="Custom engine id"
                 value={form.id}
                 onChange={event => setForm(current => ({ ...current, id: event.target.value }))}
               />
               <input
                 style={{ ...styles.input, width: 160 }}
                 placeholder="display label"
+                aria-label="Custom engine display label"
                 value={form.label}
                 onChange={event => setForm(current => ({ ...current, label: event.target.value }))}
               />
               <select
                 style={styles.select}
                 value={form.transport}
+                aria-label="Custom engine transport"
                 onChange={event => setForm(current => ({ ...current, transport: event.target.value === 'http' ? 'http' : 'stdio' }))}
               >
                 <option value="stdio">stdio (spawn a command)</option>
@@ -1055,18 +1158,21 @@ function MemoryPanel({ memory, settingsMemory, write, onRescan, onApprove, onDis
                 <input
                   style={{ ...styles.input, width: 140 }}
                   placeholder="command (e.g. python3)"
+                  aria-label="Custom engine command"
                   value={form.command}
                   onChange={event => setForm(current => ({ ...current, command: event.target.value }))}
                 />
                 <input
                   style={{ ...styles.input, flex: 1, minWidth: 180 }}
                   placeholder="args, comma-separated (e.g. server.py, --port, 9000)"
+                  aria-label="Custom engine arguments"
                   value={form.args}
                   onChange={event => setForm(current => ({ ...current, args: event.target.value }))}
                 />
                 <input
                   style={{ ...styles.input, width: 200 }}
                   placeholder="cwd (optional, ~ ok)"
+                  aria-label="Custom engine working directory"
                   value={form.cwd}
                   onChange={event => setForm(current => ({ ...current, cwd: event.target.value }))}
                 />
@@ -1075,6 +1181,7 @@ function MemoryPanel({ memory, settingsMemory, write, onRescan, onApprove, onDis
               <input
                 style={{ ...styles.input, flex: 1 }}
                 placeholder="MCP server URL (e.g. http://127.0.0.1:8765/mcp)"
+                aria-label="Custom MCP engine URL"
                 value={form.url}
                 onChange={event => setForm(current => ({ ...current, url: event.target.value }))}
               />
@@ -1083,12 +1190,14 @@ function MemoryPanel({ memory, settingsMemory, write, onRescan, onApprove, onDis
               <span style={styles.hint}>recall tool</span>
               <input
                 style={{ ...styles.input, width: 160 }}
+                aria-label="Recall tool name"
                 value={form.recallTool}
                 onChange={event => setForm(current => ({ ...current, recallTool: event.target.value }))}
               />
               <span style={styles.hint}>store tool</span>
               <input
                 style={{ ...styles.input, width: 160 }}
+                aria-label="Store tool name"
                 value={form.storeTool}
                 disabled={form.readOnly}
                 onChange={event => setForm(current => ({ ...current, storeTool: event.target.value }))}
@@ -1121,7 +1230,9 @@ function MemoryPanel({ memory, settingsMemory, write, onRescan, onApprove, onDis
           </span>
         </div>
         {(memory?.pending ?? []).length === 0 ? (
-          <span style={styles.hint}>No pending lessons.</span>
+          <div style={styles.quietBox}>
+            <span style={styles.hint}>No pending lessons.</span>
+          </div>
         ) : (
           (memory?.pending ?? []).map(write_ => (
             <div key={write_.id} style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
@@ -1178,7 +1289,11 @@ function formatEventTime(time: number): string {
 
 function EventFeed(props: { events: EventEntryView[] }): React.ReactElement {
   if (props.events.length === 0) {
-    return <span style={styles.hint}>No advisor activity yet this server run.</span>
+    return (
+      <div style={styles.quietBox}>
+        <span style={styles.hint}>No advisor activity yet this server run.</span>
+      </div>
+    )
   }
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 4, maxHeight: 320, overflowY: 'auto' }}>
@@ -1499,6 +1614,7 @@ export function createSettingsSection(ctx: ClientCtx): React.ComponentType<{ clo
     // Tool-call interception policy (v0.9.0). The whole `toolGate` object is
     // written on every edit, mirroring how the Memory tab patches `memory`.
     const gate = value.toolGate ?? {}
+    const gateActive = gate.enabled === true
     const patchToolGate = (patch: Record<string, unknown>): void => {
       write('toolGate', { ...gate, ...patch })
     }
@@ -1594,6 +1710,8 @@ export function createSettingsSection(ctx: ClientCtx): React.ComponentType<{ clo
         </div>
         {tab === 'general' && (
         <div style={styles.card}>
+          {/* Master switch leads; the groups below express the policy areas so
+              a setting can be found by section instead of scanned. */}
           <div style={styles.row}>
             <label style={styles.label}>
               <input
@@ -1607,323 +1725,350 @@ export function createSettingsSection(ctx: ClientCtx): React.ComponentType<{ clo
               Master switch. When off, no advisor runs and session runtimes are released.
             </span>
           </div>
-          <div style={styles.row}>
-            <span style={styles.label}>Review trigger</span>
-            <select
-              style={styles.select}
-              value={value.reviewTrigger}
-              onChange={event => write('reviewTrigger', event.target.value)}
-            >
-              <option value="turn">Turn end — review completed turns</option>
-              <option value="step">Step end — review while the turn runs</option>
-            </select>
-            {value.reviewTrigger === 'step' ? (
-              <span style={{ ...styles.hint, color: 'rgb(220,160,90)' }}>
-                Step mode fires a review on every tool step — heavy on rate-limited or metered providers. Prefer
-                turn mode unless you need mid-turn advice.
-              </span>
-            ) : null}
-          </div>
-          <div style={styles.row}>
-            <span style={styles.label}>Interrupting severities</span>
-            {(['nit', 'concern', 'blocker'] as const).map(severity => (
-              <label key={severity}>
-                <input
-                  type="checkbox"
-                  checked={severities.includes(severity)}
-                  onChange={event => {
-                    const next = event.target.checked
-                      ? [...severities, severity]
-                      : severities.filter(item => item !== severity)
-                    write('interruptSeverities', next)
-                  }}
-                />{' '}
-                {severity}
-              </label>
-            ))}
-            <span style={styles.hint}>Checked severities steer at the nearest step boundary; others ride as non-interrupting context.</span>
-          </div>
-          <div style={styles.row}>
-            <span style={styles.label}>Coalesce advice (ms)</span>
-            <input
-              type="number"
-              min={0}
-              max={10000}
-              step={100}
-              style={{ ...styles.input, width: 90 }}
-              value={value.adviceCoalesceMs ?? 0}
-              onChange={event => {
-                const parsed = Number.parseInt(event.target.value, 10)
-                if (Number.isFinite(parsed)) {
-                  write('adviceCoalesceMs', Math.min(10000, Math.max(0, parsed)))
-                }
-              }}
-            />
-            <span style={styles.hint}>
-              0 = deliver each note immediately. Above 0, notes from all advisors are batched within the window
-              into one message per channel; an interrupting severity flushes the batch at once.
-            </span>
-          </div>
-          <div style={styles.row}>
-            <span style={styles.label}>Auto-retry failures</span>
-            <label>
-              <input
-                type="checkbox"
-                checked={value.autoRetry !== false}
-                onChange={event => write('autoRetry', event.target.checked)}
-              />{' '}
-              retry failed work automatically
-            </label>
-            <span style={{ ...styles.hint, opacity: 0.75 }}>after</span>
-            <input
-              type="number"
-              min={1000}
-              max={300000}
-              step={500}
-              style={{ ...styles.input, width: 90 }}
-              value={value.autoRetryDelayMs ?? 5000}
-              onChange={event => {
-                const parsed = Number.parseInt(event.target.value, 10)
-                if (Number.isFinite(parsed)) {
-                  write('autoRetryDelayMs', Math.min(300000, Math.max(1000, parsed)))
-                }
-              }}
-            />
-            <span style={{ ...styles.hint, opacity: 0.75 }}>ms, up to</span>
-            <input
-              type="number"
-              min={0}
-              max={999}
-              step={1}
-              style={{ ...styles.input, width: 70 }}
-              value={value.autoRetryMax ?? 3}
-              onChange={event => {
-                const parsed = Number.parseInt(event.target.value, 10)
-                if (Number.isFinite(parsed)) {
-                  write('autoRetryMax', Math.min(999, Math.max(0, parsed)))
-                }
-              }}
-            />
-            <span style={{ ...styles.hint, opacity: 0.75 }}>attempts (0 = unlimited)</span>
-          </div>
-          <div style={styles.row}>
-            <span style={styles.label} />
-            <span style={styles.hint}>
-              Failed advisor reviews re-run after the delay; a failed primary-model turn receives an automatic
-              “continue” message. User aborts and permanent errors (unknown model/provider) never retry, even
-              when the cap is unlimited.
-            </span>
-          </div>
-          <div style={styles.row}>
-            <span style={styles.label}>Blocker intervention</span>
-            <label>
-              <input
-                type="checkbox"
-                checked={value.interveneOnBlocker === true}
-                onChange={event => write('interveneOnBlocker', event.target.checked)}
-              />{' '}
-              cancel the running step when an advisor raises a blocker
-            </label>
-          </div>
-          <div style={styles.row}>
-            <span style={styles.label} />
-            <span style={{ ...styles.hint, color: 'rgb(220,160,90)' }}>
-              Escalation, off by default. With review trigger “step”, a blocker raised while the primary agent
-              is running aborts the step's not-yet-started tool calls and wakes the agent with the advisory.
-              Already-running tool calls are never killed. To refuse a call <em>before</em> it runs, use the
-              tool gate below. Advice stays advice unless you opt in.
-            </span>
-          </div>
-          <div style={styles.row}>
-            <span style={styles.label}>Tool gate</span>
-            <label>
-              <input
-                type="checkbox"
-                checked={gate.enabled === true}
-                onChange={event => patchToolGate({ enabled: event.target.checked })}
-              />{' '}
-              stop a tool call before it runs while an advisor finding is unresolved
-            </label>
-            <span style={styles.hint}>mode</span>
-            <select
-              style={{ ...styles.input, width: 'auto' }}
-              value={gate.mode ?? 'deny'}
-              onChange={event => patchToolGate({ mode: event.target.value as 'deny' | 'ask' })}
-            >
-              <option value="deny">deny — refuse the call, tell the model why</option>
-              <option value="ask">ask — hold the call for your decision</option>
-            </select>
-          </div>
-          <div style={styles.row}>
-            <span style={styles.label} />
-            {(['nit', 'concern', 'blocker'] as const).map(severity => (
-              <label key={severity}>
-                <input
-                  type="checkbox"
-                  checked={(gate.severities ?? ['blocker']).includes(severity)}
-                  onChange={event => {
-                    const current = gate.severities ?? ['blocker']
-                    const next = event.target.checked
-                      ? [...current, severity]
-                      : current.filter(item => item !== severity)
-                    patchToolGate({ severities: next })
-                  }}
-                />{' '}
-                {severity}
-              </label>
-            ))}
-            <span style={styles.hint}>Findings at these severities arm the gate.</span>
-          </div>
-          <div style={styles.row}>
-            <span style={styles.label} />
-            <span style={styles.hint}>
-              Refuse one finding at most{' '}
+          <SettingsGroup first title="Review" hint="How advisors watch the transcript and how notes are delivered.">
+            <div style={styles.row}>
+              <span style={styles.label}>Review trigger</span>
+              <select
+                style={styles.select}
+                value={value.reviewTrigger}
+                aria-label="Review trigger"
+                onChange={event => write('reviewTrigger', event.target.value)}
+              >
+                <option value="turn">Turn end — review completed turns</option>
+                <option value="step">Step end — review while the turn runs</option>
+              </select>
+              {value.reviewTrigger === 'step' ? (
+                <span style={{ ...styles.hint, color: 'rgb(220,160,90)' }}>
+                  Step mode fires a review on every tool step — heavy on rate-limited or metered providers. Prefer
+                  turn mode unless you need mid-turn advice.
+                </span>
+              ) : null}
+            </div>
+            <div style={styles.row}>
+              <span style={styles.label}>Interrupting severities</span>
+              {(['nit', 'concern', 'blocker'] as const).map(severity => (
+                <label key={severity}>
+                  <input
+                    type="checkbox"
+                    checked={severities.includes(severity)}
+                    onChange={event => {
+                      const next = event.target.checked
+                        ? [...severities, severity]
+                        : severities.filter(item => item !== severity)
+                      write('interruptSeverities', next)
+                    }}
+                  />{' '}
+                  {severity}
+                </label>
+              ))}
+              <span style={styles.hint}>Checked severities steer at the nearest step boundary; others ride as non-interrupting context.</span>
+            </div>
+            <div style={styles.row}>
+              <span style={styles.label}>Coalesce advice (ms)</span>
               <input
                 type="number"
                 min={0}
-                max={20}
-                step={1}
-                style={{ ...styles.input, width: 60 }}
-                value={gate.maxDenials ?? 2}
-                onChange={event => {
-                  const parsed = Number.parseInt(event.target.value, 10)
-                  if (Number.isFinite(parsed)) patchToolGate({ maxDenials: Math.min(20, Math.max(0, parsed)) })
-                }}
-              />{' '}
-              time(s), then stand down so a disagreeing advisor can never deadlock the agent (0 = never stand
-              down). A new finding re-arms it.
-            </span>
-          </div>
-          <div style={styles.row}>
-            <span style={styles.label} />
-            <span style={styles.hint}>
-              Gated tools (comma-separated; empty = the mutating set bash, write, edit):{' '}
-              <input
-                type="text"
-                style={{ ...styles.input, width: 320 }}
-                placeholder="bash, write, edit"
-                value={(gate.tools ?? []).join(', ')}
-                onChange={event =>
-                  patchToolGate({
-                    tools: event.target.value
-                      .split(',')
-                      .map(item => item.trim())
-                      .filter(item => item !== '')
-                  })
-                }
-              />
-            </span>
-          </div>
-          <div style={styles.row}>
-            <span style={styles.label} />
-            <span style={styles.hint}>
-              Extra guidance appended to the refusal the model sees:{' '}
-              <input
-                type="text"
-                style={{ ...styles.input, width: 420 }}
-                placeholder="Address the finding or explain why it is wrong."
-                value={gate.note ?? ''}
-                onChange={event => patchToolGate({ note: event.target.value })}
-              />
-            </span>
-          </div>
-          <div style={styles.row}>
-            <span style={styles.label} />
-            <span style={{ ...styles.hint, opacity: 0.75 }}>
-              Evaluated by the host's <code>tools/pre-execute</code> waterfall, so the tool body genuinely does
-              not run. Denials and stand-downs appear in the Monitor tab, and an armed finding shows in the
-              sidebar with a Clear gate button.
-            </span>
-          </div>
-          <div style={styles.row}>
-            <span style={styles.label}>Restore points</span>
-            <label>
-              <input
-                type="checkbox"
-                checked={value.restorePoints === true}
-                onChange={event => write('restorePoints', event.target.checked)}
-              />{' '}
-              snapshot the workspace with git so advisors can recommend rewinds
-            </label>
-          </div>
-          <div style={styles.row}>
-            <span style={styles.label} />
-            <span style={styles.hint}>
-              Side-effect-free git objects under refs/dsh-omp-advisor/** — your index, HEAD, branch, and files
-              are never touched. Captured at turn boundaries; keep{' '}
-              <input
-                type="number"
-                min={1}
-                max={100}
-                step={1}
-                style={{ ...styles.input, width: 60 }}
-                value={value.restorePointKeep ?? 20}
+                max={10000}
+                step={100}
+                style={{ ...styles.input, width: 90 }}
+                aria-label="Coalesce advice window in milliseconds"
+                value={value.adviceCoalesceMs ?? 0}
                 onChange={event => {
                   const parsed = Number.parseInt(event.target.value, 10)
                   if (Number.isFinite(parsed)) {
-                    write('restorePointKeep', Math.min(100, Math.max(1, parsed)))
+                    write('adviceCoalesceMs', Math.min(10000, Math.max(0, parsed)))
                   }
                 }}
-              />{' '}
-              per session.{' '}
+              />
+              <span style={styles.hint}>
+                0 = deliver each note immediately. Above 0, notes from all advisors are batched within the window
+                into one message per channel; an interrupting severity flushes the batch at once.
+              </span>
+            </div>
+            <div style={styles.row}>
+              <span style={styles.label}>Skip tiny deltas (chars)</span>
+              <input
+                type="number"
+                min={0}
+                max={100000}
+                step={50}
+                style={{ ...styles.input, width: 90 }}
+                aria-label="Skip tiny deltas threshold in characters"
+                value={value.minDeltaChars ?? 0}
+                onChange={event => {
+                  const parsed = Number.parseInt(event.target.value, 10)
+                  if (Number.isFinite(parsed)) {
+                    write('minDeltaChars', Math.min(100000, Math.max(0, parsed)))
+                  }
+                }}
+              />
+              <span style={styles.hint}>
+                0 = review everything. Above 0, transcript updates smaller than this are skipped (not replayed
+                later) — cuts advisor calls on chatty sessions.
+              </span>
+            </div>
+          </SettingsGroup>
+          <SettingsGroup title="Escalation & safety" hint="When advice becomes action — retries, cancellation, tool-call refusal.">
+            <div style={styles.row}>
+              <span style={styles.label}>Auto-retry failures</span>
               <label>
                 <input
                   type="checkbox"
-                  checked={value.restorePointOnMutation !== false}
-                  onChange={event => write('restorePointOnMutation', event.target.checked)}
+                  checked={value.autoRetry !== false}
+                  onChange={event => write('autoRetry', event.target.checked)}
                 />{' '}
-                also snapshot before mutating tools
+                retry failed work automatically
               </label>
-            </span>
-          </div>
-          <div style={styles.row}>
-            <span style={styles.label} />
-            <span style={{ ...styles.hint, opacity: 0.75 }}>
-              Rewinds are advice: the advisor names the restore point and which steps were destructive vs
-              progress; the main model runs the restore itself. Files created after a point are kept, never
-              deleted. Non-git workspaces are skipped.
-            </span>
-          </div>
-          <div style={styles.row}>
-            <span style={styles.label}>Completion gate</span>
-            <label>
+              <span style={{ ...styles.hint, opacity: 0.75 }}>after</span>
               <input
-                type="checkbox"
-                checked={value.completionGate !== false}
-                onChange={event => write('completionGate', event.target.checked)}
-              />{' '}
-              verify work is actually done before the agent claims completion
-            </label>
-          </div>
-          <div style={styles.row}>
-            <span style={styles.label} />
-            <span style={{ ...styles.hint, opacity: 0.75 }}>
-              On by default (prompt-only). If the ask is not fully implemented, the advisor instructs the agent
-              to report honestly what was and wasn't done and ask you; once complete — or once you accept the
-              compromise — it reminds the agent to commit the accepted state to its working branch.
-            </span>
-          </div>
-          <div style={styles.row}>
-            <span style={styles.label}>Skip tiny deltas (chars)</span>
-            <input
-              type="number"
-              min={0}
-              max={100000}
-              step={50}
-              style={{ ...styles.input, width: 90 }}
-              value={value.minDeltaChars ?? 0}
-              onChange={event => {
-                const parsed = Number.parseInt(event.target.value, 10)
-                if (Number.isFinite(parsed)) {
-                  write('minDeltaChars', Math.min(100000, Math.max(0, parsed)))
-                }
-              }}
-            />
-            <span style={styles.hint}>
-              0 = review everything. Above 0, transcript updates smaller than this are skipped (not replayed
-              later) — cuts advisor calls on chatty sessions.
-            </span>
-          </div>
+                type="number"
+                min={1000}
+                max={300000}
+                step={500}
+                style={{ ...styles.input, width: 90 }}
+                aria-label="Auto-retry delay in milliseconds"
+                value={value.autoRetryDelayMs ?? 5000}
+                onChange={event => {
+                  const parsed = Number.parseInt(event.target.value, 10)
+                  if (Number.isFinite(parsed)) {
+                    write('autoRetryDelayMs', Math.min(300000, Math.max(1000, parsed)))
+                  }
+                }}
+              />
+              <span style={{ ...styles.hint, opacity: 0.75 }}>ms, up to</span>
+              <input
+                type="number"
+                min={0}
+                max={999}
+                step={1}
+                style={{ ...styles.input, width: 70 }}
+                aria-label="Auto-retry attempt cap (0 for unlimited)"
+                value={value.autoRetryMax ?? 3}
+                onChange={event => {
+                  const parsed = Number.parseInt(event.target.value, 10)
+                  if (Number.isFinite(parsed)) {
+                    write('autoRetryMax', Math.min(999, Math.max(0, parsed)))
+                  }
+                }}
+              />
+              <span style={{ ...styles.hint, opacity: 0.75 }}>attempts (0 = unlimited)</span>
+            </div>
+            <div style={styles.row}>
+              <span style={styles.subLabel} />
+              <span style={styles.hint}>
+                Failed advisor reviews re-run after the delay; a failed primary-model turn receives an automatic
+                “continue” message. User aborts and permanent errors (unknown model/provider) never retry, even
+                when the cap is unlimited.
+              </span>
+            </div>
+            <div style={styles.row}>
+              <span style={styles.label}>Blocker intervention</span>
+              <label>
+                <input
+                  type="checkbox"
+                  checked={value.interveneOnBlocker === true}
+                  onChange={event => write('interveneOnBlocker', event.target.checked)}
+                />{' '}
+                cancel the running step when an advisor raises a blocker
+              </label>
+            </div>
+            <div style={styles.row}>
+              <span style={styles.subLabel} />
+              <span style={{ ...styles.hint, color: 'rgb(220,160,90)' }}>
+                Escalation, off by default. With review trigger “step”, a blocker raised while the primary agent
+                is running aborts the step's not-yet-started tool calls and wakes the agent with the advisory.
+                Already-running tool calls are never killed. To refuse a call <em>before</em> it runs, use the
+                tool gate below. Advice stays advice unless you opt in.
+              </span>
+            </div>
+            {/* Tool gate — one coherent opt-in group. The dependent controls dim
+                while the gate is off (they still apply only when it is on) and
+                read at full strength once it is armed. */}
+            <div style={styles.row}>
+              <span style={styles.label}>Tool gate</span>
+              <label>
+                <input
+                  type="checkbox"
+                  checked={gate.enabled === true}
+                  onChange={event => patchToolGate({ enabled: event.target.checked })}
+                />{' '}
+                stop a tool call before it runs while an advisor finding is unresolved
+              </label>
+              <span style={styles.hint}>mode</span>
+              <select
+                style={{ ...styles.input, width: 'auto' }}
+                value={gate.mode ?? 'deny'}
+                aria-label="Tool gate mode"
+                onChange={event => patchToolGate({ mode: event.target.value as 'deny' | 'ask' })}
+              >
+                <option value="deny">deny — refuse the call, tell the model why</option>
+                <option value="ask">ask — hold the call for your decision</option>
+              </select>
+            </div>
+            {!gateActive && (
+              <div style={styles.row}>
+                <span style={styles.subLabel} />
+                <span style={styles.hint}>Gate is off — the controls below only apply once it is enabled.</span>
+              </div>
+            )}
+            <div style={{ ...styles.row, ...(gateActive ? undefined : { opacity: 0.45 }) }}>
+              <span style={styles.subLabel} />
+              {(['nit', 'concern', 'blocker'] as const).map(severity => (
+                <label key={severity}>
+                  <input
+                    type="checkbox"
+                    checked={(gate.severities ?? ['blocker']).includes(severity)}
+                    onChange={event => {
+                      const current = gate.severities ?? ['blocker']
+                      const next = event.target.checked
+                        ? [...current, severity]
+                        : current.filter(item => item !== severity)
+                      patchToolGate({ severities: next })
+                    }}
+                  />{' '}
+                  {severity}
+                </label>
+              ))}
+              <span style={styles.hint}>Findings at these severities arm the gate.</span>
+            </div>
+            <div style={{ ...styles.row, ...(gateActive ? undefined : { opacity: 0.45 }) }}>
+              <span style={styles.subLabel} />
+              <span style={styles.hint}>
+                Refuse one finding at most{' '}
+                <input
+                  type="number"
+                  min={0}
+                  max={20}
+                  step={1}
+                  style={{ ...styles.input, width: 60 }}
+                  aria-label="Maximum denials per finding before the gate stands down"
+                  value={gate.maxDenials ?? 2}
+                  onChange={event => {
+                    const parsed = Number.parseInt(event.target.value, 10)
+                    if (Number.isFinite(parsed)) patchToolGate({ maxDenials: Math.min(20, Math.max(0, parsed)) })
+                  }}
+                />{' '}
+                time(s), then stand down so a disagreeing advisor can never deadlock the agent (0 = never stand
+                down). A new finding re-arms it.
+              </span>
+            </div>
+            <div style={{ ...styles.row, ...(gateActive ? undefined : { opacity: 0.45 }) }}>
+              <span style={styles.subLabel} />
+              <span style={styles.hint}>
+                Gated tools (comma-separated; empty = the mutating set bash, write, edit):{' '}
+                <input
+                  type="text"
+                  style={{ ...styles.input, width: 320 }}
+                  placeholder="bash, write, edit"
+                  aria-label="Gated tools (comma-separated)"
+                  value={(gate.tools ?? []).join(', ')}
+                  onChange={event =>
+                    patchToolGate({
+                      tools: event.target.value
+                        .split(',')
+                        .map(item => item.trim())
+                        .filter(item => item !== '')
+                    })
+                  }
+                />
+              </span>
+            </div>
+            <div style={{ ...styles.row, ...(gateActive ? undefined : { opacity: 0.45 }) }}>
+              <span style={styles.subLabel} />
+              <span style={styles.hint}>
+                Extra guidance appended to the refusal the model sees:{' '}
+                <input
+                  type="text"
+                  style={{ ...styles.input, width: 420 }}
+                  placeholder="Address the finding or explain why it is wrong."
+                  aria-label="Extra guidance appended to the refusal"
+                  value={gate.note ?? ''}
+                  onChange={event => patchToolGate({ note: event.target.value })}
+                />
+              </span>
+            </div>
+            <div style={{ ...styles.row, ...(gateActive ? undefined : { opacity: 0.45 }) }}>
+              <span style={styles.subLabel} />
+              <span style={{ ...styles.hint, opacity: 0.75 }}>
+                Evaluated by the host's <code>tools/pre-execute</code> waterfall, so the tool body genuinely does
+                not run. Denials and stand-downs appear in the Monitor tab, and an armed finding shows in the
+                sidebar with a Clear gate button.
+              </span>
+            </div>
+          </SettingsGroup>
+          <SettingsGroup title="Restore points" hint="Side-effect-free git snapshots advisors can recommend rewinds against.">
+            <div style={styles.row}>
+              <span style={styles.label}>Restore points</span>
+              <label>
+                <input
+                  type="checkbox"
+                  checked={value.restorePoints === true}
+                  onChange={event => write('restorePoints', event.target.checked)}
+                />{' '}
+                snapshot the workspace with git so advisors can recommend rewinds
+              </label>
+            </div>
+            <div style={styles.row}>
+              <span style={styles.subLabel} />
+              <span style={styles.hint}>
+                Side-effect-free git objects under refs/dsh-omp-advisor/** — your index, HEAD, branch, and files
+                are never touched. Captured at turn boundaries; keep{' '}
+                <input
+                  type="number"
+                  min={1}
+                  max={100}
+                  step={1}
+                  style={{ ...styles.input, width: 60 }}
+                  aria-label="Restore points to keep per session"
+                  value={value.restorePointKeep ?? 20}
+                  onChange={event => {
+                    const parsed = Number.parseInt(event.target.value, 10)
+                    if (Number.isFinite(parsed)) {
+                      write('restorePointKeep', Math.min(100, Math.max(1, parsed)))
+                    }
+                  }}
+                />{' '}
+                per session.{' '}
+                <label>
+                  <input
+                    type="checkbox"
+                    checked={value.restorePointOnMutation !== false}
+                    onChange={event => write('restorePointOnMutation', event.target.checked)}
+                  />{' '}
+                  also snapshot before mutating tools
+                </label>
+              </span>
+            </div>
+            <div style={styles.row}>
+              <span style={styles.subLabel} />
+              <span style={{ ...styles.hint, opacity: 0.75 }}>
+                Rewinds are advice: the advisor names the restore point and which steps were destructive vs
+                progress; the main model runs the restore itself. Files created after a point are kept, never
+                deleted. Non-git workspaces are skipped.
+              </span>
+            </div>
+          </SettingsGroup>
+          <SettingsGroup title="Reporting" hint="Honest completion reporting before the agent claims done.">
+            <div style={styles.row}>
+              <span style={styles.label}>Completion gate</span>
+              <label>
+                <input
+                  type="checkbox"
+                  checked={value.completionGate !== false}
+                  onChange={event => write('completionGate', event.target.checked)}
+                />{' '}
+                verify work is actually done before the agent claims completion
+              </label>
+            </div>
+            <div style={styles.row}>
+              <span style={styles.subLabel} />
+              <span style={{ ...styles.hint, opacity: 0.75 }}>
+                On by default (prompt-only). If the ask is not fully implemented, the advisor instructs the agent
+                to report honestly what was and wasn't done and ask you; once complete — or once you accept the
+                compromise — it reminds the agent to commit the accepted state to its working branch.
+              </span>
+            </div>
+          </SettingsGroup>
         </div>
         )}
 
@@ -1938,6 +2083,7 @@ export function createSettingsSection(ctx: ClientCtx): React.ComponentType<{ clo
             <select
               style={styles.select}
               value=""
+              aria-label="Add an advisor from a preset"
               onChange={event => {
                 if (event.target.value) applyPreset(event.target.value)
               }}
@@ -1969,7 +2115,7 @@ export function createSettingsSection(ctx: ClientCtx): React.ComponentType<{ clo
           ))}
 
           <div>
-            <button style={styles.button} onClick={addAdvisor}>
+            <button style={styles.button} onClick={addAdvisor} aria-label="Add a new advisor">
               + Add advisor
             </button>
           </div>
@@ -1999,14 +2145,27 @@ export function createSettingsSection(ctx: ClientCtx): React.ComponentType<{ clo
         <div style={styles.card}>
           <strong>Live status</strong>
           {(view?.sessions ?? []).length === 0 ? (
-            <span style={styles.hint}>
-              {value.enabled
-                ? 'No sessions with attached advisors yet. Start a session and advisors will attach.'
-                : 'Advisors are disabled.'}
-            </span>
+            <div style={styles.quietBox}>
+              <span style={styles.hint}>
+                {value.enabled
+                  ? 'No sessions with attached advisors yet. Start a session and advisors will attach.'
+                  : 'Advisors are disabled.'}
+              </span>
+            </div>
           ) : (
-            (view?.sessions ?? []).map(session => (
-              <div key={session.sessionId} style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            (view?.sessions ?? []).map((session, index) => (
+              <div
+                key={session.sessionId}
+                style={{
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: 6,
+                  // Hairline between sessions so the live list scans cleanly.
+                  ...(index > 0
+                    ? { borderTop: '1px solid var(--dsh-border, rgba(128,128,128,0.15))', paddingTop: 8 }
+                    : {})
+                }}
+              >
                 <span style={styles.hint}>
                   {session.title ? (
                     <strong style={{ color: 'inherit' }}>{session.title}</strong>
@@ -2036,6 +2195,7 @@ export function createSettingsSection(ctx: ClientCtx): React.ComponentType<{ clo
                         advisor.status === 'quota_exhausted') && (
                         <button
                           style={styles.resumeButton}
+                          aria-label={`Resume advisor ${advisor.name}`}
                           title="Reset this advisor's conversation and resume reviewing"
                           onClick={() => resumeAdvisor(session.sessionId, advisor.name)}
                         >

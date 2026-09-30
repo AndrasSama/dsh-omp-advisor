@@ -287,11 +287,41 @@ const actionButton: React.CSSProperties = {
   border: '1px solid var(--dsh-border, rgba(128,128,128,0.3))',
   borderRadius: 999,
   padding: '1px 9px',
-  background: 'transparent',
+  // Subtle tint so an action reads as a button, not another chip (chips keep a
+  // transparent background).
+  background: 'var(--dsh-input-bg, rgba(128,128,128,0.08))',
   color: 'inherit',
   cursor: 'pointer',
   font: 'inherit',
   fontSize: 11
+}
+/* One attached advisor inside a session card: a quiet list item. */
+const advisorRow: React.CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: 8,
+  flexWrap: 'wrap',
+  background: 'var(--dsh-input-bg, rgba(128,128,128,0.06))',
+  borderRadius: 8,
+  padding: '6px 8px'
+}
+/* Small uppercase heading for a split section (active vs not active here). */
+const subHeading: React.CSSProperties = {
+  fontSize: 11,
+  fontWeight: 700,
+  letterSpacing: '0.07em',
+  textTransform: 'uppercase',
+  opacity: 0.7,
+  marginTop: 2
+}
+/* Quiet dashed box for the empty states. */
+const emptyBox: React.CSSProperties = {
+  border: '1px dashed var(--dsh-border, rgba(128,128,128,0.3))',
+  borderRadius: 8,
+  padding: '8px 10px',
+  display: 'flex',
+  flexDirection: 'column',
+  gap: 6
 }
 /**
  * Best-effort dark-scheme detection, dependency-free (the sidebar is an
@@ -477,7 +507,20 @@ function AdvisorsMonitorTab(props: { scopedSessionId?: string }): React.ReactEle
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
           <strong title={session.sessionId}>{name}</strong>
           {isScoped && <span style={chip}>this session</span>}
-          <span style={hint}>{session.active ? 'attached' : 'not attached'}</span>
+          {/* Attached state as a chip: dot + text, so health reads at a glance
+              and never relies on colour alone. */}
+          <span style={chip}>
+            <span
+              style={{
+                width: 7,
+                height: 7,
+                borderRadius: '50%',
+                display: 'inline-block',
+                background: session.active ? STATUS_COLORS.running : STATUS_COLORS.no_model
+              }}
+            />
+            {session.active ? 'attached' : 'not attached'}
+          </span>
           {dir && (
             <span style={chip} title={session.cwd}>
               {dir}
@@ -500,7 +543,8 @@ function AdvisorsMonitorTab(props: { scopedSessionId?: string }): React.ReactEle
           {session.toolGate && (
             <button
               type="button"
-              style={chip}
+              style={{ ...actionButton, borderColor: 'rgb(200,120,90)', color: 'rgb(230,150,120)' }}
+              aria-label={`Clear the tool gate for ${name}`}
               title="Let gated tool calls through again"
               onClick={() =>
                 runToggle(clearToolGateRpc(session.sessionId), `clear gate for "${name}"`)
@@ -511,7 +555,7 @@ function AdvisorsMonitorTab(props: { scopedSessionId?: string }): React.ReactEle
           )}
         </div>
         {session.advisors.length === 0 ? (
-          <>
+          <div style={emptyBox}>
             <span style={hint}>No advisors are attached to this session.</span>
             {matching.length > 0 ? (
               <span style={hint}>
@@ -525,13 +569,10 @@ function AdvisorsMonitorTab(props: { scopedSessionId?: string }): React.ReactEle
                 them in Settings → Ward Council → Advisors / Workspaces.
               </span>
             )}
-          </>
+          </div>
         ) : (
           session.advisors.map(advisor => (
-            <div
-              key={advisor.name}
-              style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}
-            >
+            <div key={advisor.name} style={advisorRow}>
               <span
                 title={advisor.status}
                 style={{
@@ -539,7 +580,8 @@ function AdvisorsMonitorTab(props: { scopedSessionId?: string }): React.ReactEle
                   height: 8,
                   borderRadius: '50%',
                   background: STATUS_COLORS[advisor.status] ?? '#8a8a8a',
-                  display: 'inline-block'
+                  display: 'inline-block',
+                  flexShrink: 0
                 }}
               />
               <span style={{ fontWeight: 600 }}>{advisor.name}</span>
@@ -577,7 +619,18 @@ function AdvisorsMonitorTab(props: { scopedSessionId?: string }): React.ReactEle
 
   return (
     <div style={panel}>
-      {scoped && !scopedSession && (
+      {/* No data at all: the snapshot RPC never succeeded — say so instead of
+          showing a misleading "no advisors" state. */}
+      {snapshot === null && (
+        <div style={cardStyle}>
+          <strong>Waiting for the advisor service</strong>
+          <span style={hint}>
+            No data yet — the dsh-omp-advisor host service is not reachable. Is the plugin enabled
+            (Settings → Ward Council → General) and DSH running? This tab retries every few seconds.
+          </span>
+        </div>
+      )}
+      {snapshot !== null && scoped && !scopedSession && (
         <div style={cardStyle}>
           <strong>No advisors in this workspace</strong>
           <span style={hint}>
@@ -586,7 +639,7 @@ function AdvisorsMonitorTab(props: { scopedSessionId?: string }): React.ReactEle
           </span>
         </div>
       )}
-      {!scoped && sessions.length === 0 && (
+      {snapshot !== null && !scoped && sessions.length === 0 && (
         <div style={cardStyle}>
           <strong>No advisor sessions</strong>
           <span style={hint}>
@@ -609,12 +662,17 @@ function AdvisorsMonitorTab(props: { scopedSessionId?: string }): React.ReactEle
             <span style={hint}>No advisors configured yet — add one below.</span>
           ) : (
             <>
+              {workspaceSplit.active.length > 0 && (
+                <span style={subHeading}>
+                  Active in this workspace ({workspaceSplit.active.length})
+                </span>
+              )}
               {workspaceSplit.active.map((entry, index) => {
                 const live = scopedSession?.advisors.find(advisor => advisor.name === entry.name)
                 return (
                   <div
                     key={`active-${index}-${entry.name ?? ''}`}
-                    style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}
+                    style={advisorRow}
                   >
                     <span
                       title={live ? live.status : 'active here'}
@@ -623,30 +681,44 @@ function AdvisorsMonitorTab(props: { scopedSessionId?: string }): React.ReactEle
                         height: 8,
                         borderRadius: '50%',
                         background: live ? STATUS_COLORS[live.status] ?? '#8a8a8a' : '#4caf7d',
-                        display: 'inline-block'
+                        display: 'inline-block',
+                        flexShrink: 0
                       }}
                     />
                     <span style={{ fontWeight: 600 }}>{entry.name || 'unnamed'}</span>
                     <span style={hint}>{live ? live.status : 'active here'}</span>
-                    <button style={actionButton} onClick={() => disableHere(entry.name ?? '')}>
+                    <button
+                      style={actionButton}
+                      aria-label={`Disable ${entry.name ?? 'this advisor'} in this workspace`}
+                      onClick={() => disableHere(entry.name ?? '')}
+                    >
                       Disable here
                     </button>
                   </div>
                 )
               })}
+              {workspaceSplit.inactive.length > 0 && (
+                <span style={subHeading}>
+                  Not active here ({workspaceSplit.inactive.length})
+                </span>
+              )}
               {workspaceSplit.inactive.map(({ entry, reason }, index) => (
                 <div
                   key={`inactive-${index}-${entry.name ?? ''}`}
-                  style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', opacity: 0.75 }}
+                  style={{ ...advisorRow, opacity: 0.75 }}
                 >
                   <span
-                    style={{ width: 8, height: 8, borderRadius: '50%', background: '#8a8a8a', display: 'inline-block' }}
+                    style={{ width: 8, height: 8, borderRadius: '50%', background: '#8a8a8a', display: 'inline-block', flexShrink: 0 }}
                   />
                   <span style={{ fontWeight: 600 }}>{entry.name || 'unnamed'}</span>
                   <span style={chip}>
                     {reason === 'off' ? 'off' : reason === 'disabled-here' ? 'disabled here' : 'not in this workspace'}
                   </span>
-                  <button style={actionButton} onClick={() => enableHere(entry.name ?? '')}>
+                  <button
+                    style={actionButton}
+                    aria-label={`Enable ${entry.name ?? 'this advisor'} in this workspace`}
+                    onClick={() => enableHere(entry.name ?? '')}
+                  >
                     Enable here
                   </button>
                 </div>
