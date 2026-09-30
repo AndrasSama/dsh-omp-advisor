@@ -339,9 +339,17 @@ The plugin packages **250 advisor skills** under [`skills/<id>/SKILL.md`](./skil
 ```bash
 npm install        # dev deps only; DSH packages are runtime-provided
 npm run build      # gen-skills + host ESM (lib/index.js) + client CJS ModuleLoader bundle (lib/client.js)
-npm test           # 144 unit tests over the ported semantics + memory
+npm test           # 154 unit tests over the ported semantics + memory
 npm run typecheck  # tsc --noEmit (DSH packages shimmed)
 ```
+
+**Syncing a local install (read this before testing your change).** Installing this plugin from a checkout with a `file:` spec makes the profile materialise it as a **hard-link farm** — every installed file shares an inode with the file in your checkout. That looks like it stays in sync, and for files you never rewrite it does; but a build does not edit `lib/client.js` in place, it renames a new file over the old one, which allocates a new inode and **breaks the link**. From that moment the installed copy keeps serving the previous build, with no error and no version mismatch — the only symptom is that your change is simply not there. So after every build, before restarting DSH:
+
+```bash
+node scripts/sync-installed.mjs        # defaults to $DSH_HOME/profiles/web/node_modules/dsh-omp-advisor
+```
+
+It only rewrites files that are already installed, refuses a target that is not this plugin, and is a no-op when already in sync. Then restart DSH Web for the host half and reload the page for the client half.
 
 Layout: `src/` host plugin (settings, service, runtime, advisor loop, tools, delivery, quarantine, delta, restore-points, memory), `src/client/` settings section (multi-tab) + presets + optional better-sidebar tab (`sidebar.tsx`), `src/prompts/` ported advisor prompts (incl. the completion-gate protocol and the memory-recall protocol), `skills/` the 250 packaged advisor skills (source of truth for the build-time embeds), `scripts/gen-skills.mjs` the skill embed generator, `test/` node:test suite (git-backed tests run against real temporary repositories and skip cleanly when git is absent; client modules are tested through a minimal React stub).
 
