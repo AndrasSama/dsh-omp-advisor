@@ -550,5 +550,13 @@ function apply(ctx) {
 	}, "dsh-omp-advisor: composer model seat");
 }
 
-/** Register the searchable model seat on a client root context. */
-export { apply as applyModelSeat }
+/**
+ * Register the searchable model seat on a client root context.
+ *
+ * `SearchableModelSelect` is exported alongside it so the plugin's own settings
+ * surface can reuse the same searchable picker. It reads one injected "directory"
+ * face (`subscribe`/`getSnapshot`), so any caller holding a model catalog can
+ * project it — the composer passes the per-session store, and the Advisors tab
+ * passes the advisor catalog. One implementation, one interaction, no fork.
+ */
+export { apply as applyModelSeat, SearchableModelSelect }

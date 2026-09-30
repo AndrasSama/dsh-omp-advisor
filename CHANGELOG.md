@@ -6,6 +6,58 @@ v0.9.0; earlier releases are described in the git log and the README.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.0] — 2026-09-30
+
+Two surfaces get the searchable model picker, and the settings UI is reorganised.
+
+### Added
+
+- **The Advisors tab picks models with the searchable selector.** Each advisor's
+  model was a plain `<select>` over a provider's full model list — workable at 80
+  models, unusable at 460. The picker now type-filters across name, id,
+  description and provider, shows the current pick, and offers the reasoning-effort
+  choices the model advertises, all before the first keystroke.
+
+  The selector is the *same component* as the composer seat, not a second
+  implementation: it was built around one injected "directory" face
+  (`subscribe`/`getSnapshot`), so the advisor catalog is projected into that shape
+  and handed to it. `projectCatalogForModelSeat` is the entire adaptation — the
+  catalog nests `efforts`/`defaultEffort` on the model while the seat reads them
+  under `model.reasoning` — and it is exported and unit-tested, because getting it
+  wrong fails silently (a picker that renders but cannot find the current model).
+  `SearchableModelSelect` is now exported alongside `applyModelSeat` for reuse.
+
+  The subscription is inert on purpose: the settings section re-renders from its own
+  state, so the snapshot only has to be referentially stable across renders of
+  unchanged inputs. It is memoised for exactly that reason — `useSyncExternalStore`
+  compares snapshots with `Object.is`, and a fresh object per read loops forever.
+
+### Changed
+
+- **Settings section reorganised** (presentational only). The General tab's ~20
+  undifferentiated rows are grouped under headed sections — Review, Escalation &
+  safety, Restore points, Reporting — so a setting is findable by area. The
+  tool-gate controls dim with an explicit "gate is off" hint while the gate is
+  disabled, staying interactive so the gate can still be pre-configured. The
+  Advisors tab's collapsed header shows model and provider as a chip, and its
+  chevron is a real keyboard-operable button with `aria-expanded`. `aria-label` was
+  added to every previously unlabelled control; focus rings are untouched.
+
+- **Sidebar tab** (presentational only). Session health is a chip pairing a status
+  dot with text, never colour alone. Attached advisors read as list items, the
+  active/inactive split has counted headings, and empty states are honest: a
+  dedicated "Waiting for the advisor service" card appears when the snapshot RPC
+  has never succeeded, instead of claiming there are no advisors.
+
+### Notes
+
+- The test bundler now stubs `react-dom` and extends the React stub with
+  `Fragment`, `useLayoutEffect` and `useSyncExternalStore`, so client modules that
+  portal are importable in Node.
+- Every projection property is mutation-verified: reporting `ready` without a
+  catalog, leaving efforts unnested, always attaching `reasoning`, and emitting an
+  `undefined` effort each fail their own test. 170 tests total.
+
 ## [0.9.3] — 2026-09-30
 
 Closes the **feedback loop** on the advisor's most consequential signal.

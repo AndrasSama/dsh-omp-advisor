@@ -25,7 +25,8 @@ await build({
     '@deepseek-ai/schemastery': join(root, 'test/stubs/schemastery.ts'),
     '@deepseek-ai/cordis': join(root, 'test/stubs/cordis.ts'),
     '@deepseek-ai/dsh-llm': join(root, 'test/stubs/dsh-llm.ts'),
-    react: join(root, 'test/stubs/react.ts')
+    react: join(root, 'test/stubs/react.ts'),
+    'react-dom': join(root, 'test/stubs/react-dom.ts')
   },
   logLevel: 'warning'
 })

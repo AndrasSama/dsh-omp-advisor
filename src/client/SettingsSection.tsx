@@ -11,10 +11,70 @@
  */
 import * as React from 'react'
 import { fetchModelCatalog, unwrapRpcResult, type ModelCatalog } from './model-catalog'
+import { SearchableModelSelect } from './model-select'
 import { ADVISOR_PRESETS, findPreset } from './presets'
 import { SKILL_CATALOG } from './skill-catalog.generated'
 
 const { useCallback, useEffect, useMemo, useRef, useState } = React
+
+/* --------------------------- model-seat projection --------------------------- */
+
+/**
+ * Project the advisor catalog into the snapshot shape the searchable model seat
+ * reads.
+ *
+ * The seat (see `./model-select`) was built against the composer's per-session
+ * model directory and reads `groups[].models[]`, with reasoning advertised under
+ * `model.reasoning`. The advisor catalog nests `efforts`/`defaultEffort` directly
+ * on the model instead, and identifies the current pick as `{provider, model}`.
+ * This is the whole adaptation between the two, kept pure and exported so it can
+ * be tested without mounting React.
+ *
+ * `status` is what drives the seat's loading state: an absent catalog is `idle`
+ * (still fetching), a present one is `ready`. Reporting `ready` for an absent
+ * catalog would show "no models" instead of "loading".
+ */
+export function projectCatalogForModelSeat(
+  catalog: ModelCatalog | undefined,
+  current: { provider: string; model: string; reasoningEffort?: string }
+): {
+  groups: {
+    id: string
+    name: string
+    models: {
+      id: string
+      name: string
+      description?: string
+      reasoning?: { efforts: { id: string; name: string; description?: string }[]; defaultEffort?: string }
+    }[]
+  }[]
+  current: { provider: string; model: string; reasoningEffort?: string }
+  status: 'idle' | 'ready'
+  failures: { id: string; name: string; message: string }[]
+} {
+  return {
+    groups: (catalog?.groups ?? []).map(group => ({
+      id: group.id,
+      name: group.name,
+      models: group.models.map(model => ({
+        id: model.id,
+        name: model.name,
+        ...(model.description === undefined ? {} : { description: model.description }),
+        ...(model.efforts.length === 0
+          ? {}
+          : {
+              reasoning: {
+                efforts: model.efforts,
+                ...(model.defaultEffort === undefined ? {} : { defaultEffort: model.defaultEffort })
+              }
+            })
+      }))
+    })),
+    current: { ...current },
+    status: catalog === undefined ? 'idle' : 'ready',
+    failures: catalog?.failures ?? []
+  }
+}
 
 /* ------------------------------ local contracts ----------------------------- */
 
@@ -430,14 +490,40 @@ const AdvisorCard = React.memo(function AdvisorCard({
       )),
     [catalog]
   )
-  const modelOptions = useMemo(
-    () =>
-      (group?.models ?? []).map(item => (
-        <option key={item.id} value={item.id}>
-          {item.name || item.id}
-        </option>
-      )),
-    [group]
+  /*
+   * The advisory model picker reuses the composer's searchable selector rather
+   * than a second, weaker implementation. That component reads one injected
+   * "directory" face, so the catalog already in hand is projected into it: the
+   * catalog nests `efforts`/`defaultEffort` on the model, while the seat reads
+   * them under `model.reasoning`, and the seat's `current` is `{provider, model}`.
+   *
+   * The subscription is deliberately inert — this section re-renders from its own
+   * state, so the snapshot only has to be referentially stable across renders of
+   * unchanged inputs. It is memoised for exactly that reason: `useSyncExternalStore`
+   * compares snapshots with `Object.is`, and a fresh object per read would loop.
+   */
+  const modelDirectory = useMemo(() => {
+    const snapshot = projectCatalogForModelSeat(catalog, {
+      provider: entry.provider,
+      model: entry.model,
+      ...(entry.reasoningEffort === undefined ? {} : { reasoningEffort: entry.reasoningEffort })
+    })
+    return {
+      subscribe: () => () => {},
+      getSnapshot: () => snapshot
+    }
+  }, [catalog, entry.provider, entry.model, entry.reasoningEffort])
+
+  const selectModel = useCallback(
+    (selection: { provider: string; model: string; reasoningEffort?: string }) => {
+      onPatch(index, {
+        provider: selection.provider,
+        model: selection.model,
+        reasoningEffort: selection.reasoningEffort
+      })
+      return true
+    },
+    [onPatch, index]
   )
   const effortOptions = useMemo(
     () =>
@@ -569,14 +655,14 @@ const AdvisorCard = React.memo(function AdvisorCard({
               <option value="">— provider —</option>
               {providerOptions}
             </select>
-            <select
-              style={styles.select}
-              value={entry.model}
-              onChange={event => onPatch(index, { model: event.target.value, reasoningEffort: undefined })}
-            >
-              <option value="">— model —</option>
-              {modelOptions}
-            </select>
+            <div style={{ minWidth: 220, flex: '1 1 220px' }}>
+              <SearchableModelSelect
+                available
+                directory={modelDirectory}
+                load={() => {}}
+                select={selectModel}
+              />
+            </div>
             {efforts.length > 0 && (
               <select
                 style={styles.select}

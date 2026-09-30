@@ -7,6 +7,7 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 import {
   AdviseGate,
+  projectCatalogForModelSeat,
   AdvisorLoop,
   AdvisorOutputQuarantinedError,
   AdvisorService,
@@ -59,6 +60,73 @@ import {
   MemoryManager,
   buildStoreArgs
 } from './.bundle.mjs'
+
+/* ------------------------- model-seat projection ---------------------------- */
+
+test('catalog projection gives the seat the shape it reads', () => {
+  const catalog = {
+    groups: [
+      {
+        id: 'nvidia-nim',
+        name: 'NVIDIA NIM',
+        models: [
+          {
+            id: 'z-ai/glm-5.3-flash',
+            name: 'GLM 5.3 Flash',
+            description: 'fast',
+            efforts: [{ id: 'low', name: 'Low' }, { id: 'high', name: 'High' }],
+            defaultEffort: 'low'
+          }
+        ]
+      }
+    ],
+    failures: [{ id: 'inferx', name: 'InferX', message: 'down' }]
+  }
+  const snapshot = projectCatalogForModelSeat(catalog, { provider: 'nvidia-nim', model: 'z-ai/glm-5.3-flash' })
+
+  assert.equal(snapshot.status, 'ready')
+  assert.deepEqual(snapshot.failures, catalog.failures)
+  assert.deepEqual(snapshot.current, { provider: 'nvidia-nim', model: 'z-ai/glm-5.3-flash' })
+
+  const group = snapshot.groups[0]
+  assert.equal(group.id, 'nvidia-nim')
+  assert.equal(group.name, 'NVIDIA NIM')
+  // The seat reads reasoning under `model.reasoning`; the catalog nests it flat.
+  assert.deepEqual(group.models[0].reasoning, {
+    efforts: [{ id: 'low', name: 'Low' }, { id: 'high', name: 'High' }],
+    defaultEffort: 'low'
+  })
+  assert.equal(group.models[0].name, 'GLM 5.3 Flash')
+  assert.equal(group.models[0].description, 'fast')
+})
+
+test('catalog projection omits reasoning when a model advertises no efforts', () => {
+  const catalog = {
+    groups: [{ id: 'p', name: 'P', models: [{ id: 'm', name: 'M', efforts: [] }] }],
+    failures: []
+  }
+  const snapshot = projectCatalogForModelSeat(catalog, { provider: 'p', model: 'm' })
+  assert.equal('reasoning' in snapshot.groups[0].models[0], false)
+})
+
+test('catalog projection reports idle (not empty) while the catalog is absent', () => {
+  // `idle` is what makes the seat render its loading state; `ready` with no
+  // groups would tell the user there are no models, which is a different claim.
+  const snapshot = projectCatalogForModelSeat(undefined, { provider: '', model: '' })
+  assert.equal(snapshot.status, 'idle')
+  assert.deepEqual(snapshot.groups, [])
+  assert.deepEqual(snapshot.failures, [])
+})
+
+test('catalog projection carries the reasoning effort through unchanged', () => {
+  const catalog = { groups: [], failures: [] }
+  const snapshot = projectCatalogForModelSeat(catalog, { provider: 'p', model: 'm', reasoningEffort: 'high' })
+  assert.deepEqual(snapshot.current, { provider: 'p', model: 'm', reasoningEffort: 'high' })
+  // An unset effort must stay ABSENT rather than becoming `undefined`: the seat
+  // distinguishes "take the model default" from "pin the provider default".
+  const bare = projectCatalogForModelSeat(catalog, { provider: 'p', model: 'm' })
+  assert.equal('reasoningEffort' in bare.current, false)
+})
 
 /* -------------------------------- AdviseGate -------------------------------- */
 

@@ -33,4 +33,30 @@ export function memo<T>(component: T): T {
   return component
 }
 
-export default { createElement, useState, useEffect, useCallback, useMemo, useRef, memo }
+/** Fragment: a stable identity is all createElement needs to describe it. */
+export const Fragment = Symbol.for('react.fragment')
+
+/** No-op like useEffect — the probe paths never paint. */
+export function useLayoutEffect(_effect: () => unknown, _deps?: unknown[]): void {}
+
+/**
+ * Return the current snapshot. The seat memoises its snapshot object precisely
+ * so this stays referentially stable across reads; a fresh object per call
+ * would make React's Object.is comparison loop.
+ */
+export function useSyncExternalStore<T>(_subscribe: (notify: () => void) => () => void, getSnapshot: () => T): T {
+  return getSnapshot()
+}
+
+export default {
+  createElement,
+  useState,
+  useEffect,
+  useLayoutEffect,
+  useSyncExternalStore,
+  useCallback,
+  useMemo,
+  useRef,
+  memo,
+  Fragment
+}
