@@ -11,6 +11,7 @@ import { AdvisorLoop } from './advisor-loop'
 import { formatAdvisorBatchContent, isInterruptingSeverity, resolveDeliveryChannel } from './delivery'
 import { PLUGIN_NAME, renderDelta } from './delta'
 import type {
+  AdviceOutcome,
   AdvisorEntry,
   AdvisorNote,
   AdvisorRuntimeStatus,
@@ -489,35 +490,40 @@ export class SessionAdvisorRuntime {
    * Arm the gate from an accepted finding. A new finding replaces the previous
    * one and resets its denial count, so the bound is per-finding rather than per
    * session — an advisor that keeps raising fresh blockers keeps its veto.
+   *
+   * Returns whether this finding armed the gate, so the caller can tell the
+   * advisor that its note now carries a veto.
    */
-  private armGate(advisorName: string, severity: AdvisorSeverity | undefined, note: string): void {
-    if (!severity || !this.toolGate.severities.includes(severity)) return
+  private armGate(advisorName: string, severity: AdvisorSeverity | undefined, note: string): boolean {
+    if (!severity || !this.toolGate.severities.includes(severity)) return false
     this.gate = { advisor: advisorName, severity, note, denials: 0 }
+    return true
   }
 
-  private deliver(note: string, severity: AdvisorSeverity | undefined, advisorName: string, meta?: AdvisorNote['meta']): void {
+  private deliver(note: string, severity: AdvisorSeverity | undefined, advisorName: string, meta?: AdvisorNote['meta']): AdviceOutcome {
     const advisorNote: AdvisorNote = { note, severity, advisor: advisorName, ...(meta ? { meta } : {}) }
     this.recentNotes.push(advisorNote)
     if (this.recentNotes.length > RECENT_NOTES_LIMIT) this.recentNotes.shift()
-    this.armGate(advisorName, severity, note)
+    const gated = this.armGate(advisorName, severity, note)
+    const outcome: AdviceOutcome = { gated, maxDenials: this.toolGate.maxDenials }
 
     const slot = this.slots.get(advisorName)
     if (slot) slot.adviceDelivered++
 
     if (!this.host.getAgent()) {
       this.host.log?.('advisor note dropped (no live agent)', { session: this.host.sessionId, advisorName })
-      return
+      return outcome
     }
 
     if (this.coalesceMs <= 0) {
       this.emitNotes([advisorNote])
-      return
+      return outcome
     }
 
     this.pendingNotes.push(advisorNote)
     if (isInterruptingSeverity(severity, this.interruptSeverities)) {
       this.flushNotes()
-      return
+      return outcome
     }
     if (this.coalesceTimer === undefined) {
       this.coalesceTimer = setTimeout(() => {
@@ -525,6 +531,7 @@ export class SessionAdvisorRuntime {
         this.flushNotes()
       }, this.coalesceMs)
     }
+    return outcome
   }
 
   /** Flush the coalesce buffer now (timer cancelled, notes emitted together). */

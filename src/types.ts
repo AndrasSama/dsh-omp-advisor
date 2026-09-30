@@ -10,6 +10,22 @@
 /** How strongly the advisor weighs a note. Omitted severity is a plain nit. */
 export type AdvisorSeverity = 'nit' | 'concern' | 'blocker'
 
+/**
+ * What became of a delivered note, returned to the advising tool so the model
+ * can be told the consequence of its own call.
+ *
+ * A gating severity does not merely advise: it arms a veto over the watched
+ * agent's next mutating tool call. Before this existed the advisor received a
+ * bare `Recorded.` for a note that had just blocked a tool call, so its most
+ * consequential signal was the one it could never calibrate against.
+ */
+export interface AdviceOutcome {
+  /** This note armed the tool-call gate. */
+  gated: boolean
+  /** How many calls the gate may stop before it stands down (meaningful when gated). */
+  maxDenials: number
+}
+
 /** One advice note produced by an advisor's `advise` tool call. */
 export interface AdvisorNote {
   note: string

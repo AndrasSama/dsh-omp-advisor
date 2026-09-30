@@ -9,7 +9,26 @@
  * when the turn completes, so partial work is not interrupted and no advice
  * is lost.
  */
-import type { AdvisorSeverity } from './types'
+import type { AdvisorSeverity, AdviceOutcome } from './types'
+
+/**
+ * Tell the advisor exactly what its call did.
+ *
+ * A gating severity is not merely advice: it arms a veto over the watched
+ * agent's next mutating tool call. The advisor used to receive a bare
+ * `Recorded.` for a note that had just blocked a tool call — it could neither
+ * calibrate the severity it chose nor notice that the gate had stood down after
+ * the denial bound, which is precisely the feedback a peer reviewer needs.
+ */
+function recordedReply(outcome: AdviceOutcome | undefined): string {
+  if (!outcome?.gated) return 'Recorded.'
+  return (
+    'Recorded — this note GATES the watched agent: its next mutating tool call ' +
+    `(write/edit/bash) is refused, up to ${outcome.maxDenials} times, after which the gate stands down ` +
+    'and calls proceed again. The gate stays armed until the user acknowledges it or newer work supersedes it, ' +
+    'and a fresh finding replaces this one. Escalate only when you mean to stop work.'
+  )
+}
 
 const SEVERITY_RANK: Record<AdvisorSeverity, number> = { nit: 1, concern: 2, blocker: 3 }
 
@@ -41,6 +60,8 @@ export interface AdviseResult {
   delivered: boolean
   /** True when the note was deferred until the turn completes. */
   deferred: boolean
+  /** Set when this note armed the tool-call gate, so the model can be told. */
+  outcome?: AdviceOutcome
 }
 
 /**
@@ -55,7 +76,7 @@ export class AdviseGate {
   private deferredNotes: { key: string; note: string; severity?: AdvisorSeverity; meta?: AdviceMeta }[] = []
 
   constructor(
-    private readonly onAdvice: (note: string, severity?: AdvisorSeverity, meta?: AdviceMeta) => void
+    private readonly onAdvice: (note: string, severity?: AdvisorSeverity, meta?: AdviceMeta) => AdviceOutcome | undefined
   ) {}
 
   /**
@@ -105,23 +126,27 @@ export class AdviseGate {
         deferred: true
       }
     }
-    const delivered = this.deliver(note, severity, meta)
+    const outcome = this.deliver(note, severity, meta)
+    const delivered = outcome !== undefined
     return {
-      modelReply: delivered ? 'Recorded.' : 'Duplicate advice ignored.',
+      modelReply: delivered ? recordedReply(outcome) : 'Duplicate advice ignored.',
       delivered,
-      deferred: false
+      deferred: false,
+      ...(outcome ? { outcome } : {})
     }
   }
 
-  /** Escalation-rank dedupe; returns true when the note was delivered. */
-  private deliver(note: string, severity?: AdvisorSeverity, meta?: AdviceMeta): boolean {
+  /**
+   * Escalation-rank dedupe. Returns the delivery outcome (undefined when the
+   * note was suppressed as a duplicate).
+   */
+  private deliver(note: string, severity?: AdvisorSeverity, meta?: AdviceMeta): AdviceOutcome | undefined {
     const key = dedupeKey(note)
     const rank = severityRank(severity)
     const previousRank = this.deliveredRanks.get(key) ?? 0
-    if (rank <= previousRank) return false
+    if (rank <= previousRank) return undefined
     this.deliveredRanks.set(key, rank)
-    this.onAdvice(note, severity, meta)
-    return true
+    return this.onAdvice(note, severity, meta)
   }
 }
 
@@ -129,7 +154,7 @@ export class AdviseGate {
 export const ADVISE_TOOL_SCHEMA = {
   name: 'advise',
   description:
-    'Watched agent: send 1 concrete, terse advice.\nUse sparingly; stay silent when nothing matters.\nCall to avert likely-wrong or materially wasteful work.',
+    'Watched agent: send 1 concrete, terse advice.\nUse sparingly; stay silent when nothing matters.\nCall to avert likely-wrong or materially wasteful work.\nA `blocker` is not just advice: it refuses the agent\'s next mutating tool call until the gate stands down.',
   parameters: {
     type: 'object',
     additionalProperties: false,
@@ -142,7 +167,8 @@ export const ADVISE_TOOL_SCHEMA = {
       severity: {
         type: 'string',
         enum: ['nit', 'concern', 'blocker'],
-        description: 'How strongly to weigh this. Omit for a plain nit.'
+        description:
+          'How strongly to weigh this. Omit for a plain nit. `concern` offers a view the agent decides on; `blocker` refuses the agent\'s next mutating tool call (bounded), so escalate only to stop work.'
       },
       rewindTo: {
         type: 'string',

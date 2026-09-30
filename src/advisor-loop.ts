@@ -28,7 +28,7 @@ import {
   probeGit,
   restoreInstructions
 } from './restore-points'
-import type { AdvisorEntry, AdvisorSeverity, LlmContentBlock, LlmLike, LlmStreamChunk } from './types'
+import type { AdvisorEntry, AdvisorSeverity, AdviceOutcome, LlmContentBlock, LlmLike, LlmStreamChunk } from './types'
 import systemPrompt from './prompts/system.md'
 import adviseToolPrompt from './prompts/advise-tool.md'
 import completionGatePrompt from './prompts/completion-gate.md'
@@ -54,7 +54,7 @@ export interface AdvisorLoopHost {
   /** Include the memory protocol (recall usage + lesson extraction). */
   memoryEnabled?: boolean
   /** Called for every accepted advice note. */
-  onAdvice(note: string, severity: AdvisorSeverity | undefined, advisorName: string, meta?: AdviceMeta): void
+  onAdvice(note: string, severity: AdvisorSeverity | undefined, advisorName: string, meta?: AdviceMeta): AdviceOutcome | undefined
   /** Called when a review emits a durable lesson (v0.7.0 memory). */
   onMemoryLesson?(lesson: { text: string; tags: string[] }, advisorName: string): void
   log?(message: string, meta?: Record<string, unknown>): void

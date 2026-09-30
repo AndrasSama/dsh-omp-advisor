@@ -6,6 +6,41 @@ v0.9.0; earlier releases are described in the git log and the README.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.3] — 2026-09-30
+
+Closes the **feedback loop** on the advisor's most consequential signal.
+
+### Fixed
+
+- **A `blocker` now tells the advisor it gated.** Since tool-call interception
+  landed, a gating-severity finding does not merely advise — it arms a real veto
+  over the watched agent's next `write`/`edit`/`bash` call. But the advisor was
+  handed a bare `Recorded.` for a note that had just blocked a tool call, so the
+  one signal with teeth was the one it could never calibrate: it could not tell a
+  note that stopped work from a note that was merely filed, could not see that the
+  gate stands down after a bounded number of denials, and could not learn which of
+  its judgements had been right to escalate.
+
+  The `advise` reply now reports the consequence — whether the note gated, and how
+  many refusals it may cost before the gate stands down on its own. Non-gating
+  severities keep the plain `Recorded.`, and a duplicate-suppressed note reports no
+  outcome, since nothing was delivered.
+
+- **The prompt states the cost, not just the permission.** `system.md` defined
+  `blocker` as "Stop/reconsider" advice and `advise-tool.md` said nothing about the
+  gate, which left a model-perceived licence to escalate for emphasis. Both now say
+  a `blocker` refuses the agent's next mutating call, that the reply reports whether
+  it did, and that a wrong `concern` wastes a paragraph while a wrong `blocker`
+  stops the agent — escalate only to stop work.
+
+### Notes
+
+- Threads an `AdviceOutcome` from the runtime's delivery through the gate and the
+  advise tool, so the model's reply describes the real effect rather than a
+  constant. Verified by mutation: reverting the reply to a constant fails the
+  gating test, and dropping the outcome from the result fails two more.
+  166 tests total.
+
 ## [0.9.2] — 2026-09-30
 
 Fixes the **input side** of the advisor loop: what the reviewer is actually shown.

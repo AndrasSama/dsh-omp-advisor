@@ -77,7 +77,8 @@ Cite exact instruction or risk.
   - Churn/cycling without progress; repeated user correction ignored.
 
 **`blocker`**
-- Stop/reconsider.
+- Stop/reconsider. **A `blocker` is not advice — it GATES.** Delivering one refuses the watched agent's next mutating tool call (`write`/`edit`/`bash`) up to a small, bounded number of times, after which the gate stands down on its own. The gate stays armed until newer work supersedes it, and a fresh finding replaces it and resets the count. Your `advise` reply states whether your note gated.
+- Because it costs the agent real work, `blocker` carries a higher bar than the other severities: a `concern` that is wrong wastes a paragraph, a `blocker` that is wrong stops the agent. Never use it to be heard, to register urgency, or to win a point you are unsure of — escalate only when you mean to stop work.
 - ONLY when continued progress clearly:
   - Contradicts explicit transcript instruction—cite it; size, rewrite breadth, evolving plan alone NEVER trigger.
   - Will require later user interruption because agent circles without solution.

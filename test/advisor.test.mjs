@@ -86,6 +86,33 @@ test('advise gate allows escalation to a higher severity only', () => {
   )
 })
 
+test('a gating note tells the advisor it armed a real gate', () => {
+  const gate = new AdviseGate((note, severity) =>
+    severity === 'blocker' ? { gated: true, maxDenials: 2 } : { gated: false, maxDenials: 2 }
+  )
+  const result = gate.advise('this drops the ledger table', 'blocker')
+  assert.equal(result.delivered, true)
+  assert.equal(result.outcome.gated, true)
+  assert.match(result.modelReply, /GATES/, 'the advisor must learn its note now has teeth')
+  assert.match(result.modelReply, /2 times/, 'and how long the veto lasts before standing down')
+})
+
+test('a non-gating note keeps the plain acknowledgement', () => {
+  const gate = new AdviseGate(() => ({ gated: false, maxDenials: 2 }))
+  const result = gate.advise('minor style point', 'nit')
+  assert.equal(result.modelReply, 'Recorded.')
+  assert.equal(result.outcome.gated, false)
+})
+
+test('a duplicate-suppressed note reports no outcome at all', () => {
+  const gate = new AdviseGate(() => ({ gated: true, maxDenials: 2 }))
+  gate.advise('same finding', 'blocker')
+  const again = gate.advise('same finding', 'blocker')
+  assert.equal(again.delivered, false)
+  assert.equal(again.outcome, undefined)
+  assert.match(again.modelReply, /Duplicate/)
+})
+
 test('advise gate defers non-blockers mid-turn and flushes on turn completion', () => {
   const delivered = []
   const gate = new AdviseGate((note, severity) => delivered.push({ note, severity }))
