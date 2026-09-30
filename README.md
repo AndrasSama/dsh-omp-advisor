@@ -339,11 +339,19 @@ The plugin packages **250 advisor skills** under [`skills/<id>/SKILL.md`](./skil
 ```bash
 npm install        # dev deps only; DSH packages are runtime-provided
 npm run build      # gen-skills + host ESM (lib/index.js) + client CJS ModuleLoader bundle (lib/client.js)
-npm test           # 154 unit tests over the ported semantics + memory
+npm test           # 163 unit tests over the ported semantics + memory
 npm run typecheck  # tsc --noEmit (DSH packages shimmed)
 ```
 
-**Syncing a local install (read this before testing your change).** Installing this plugin from a checkout with a `file:` spec makes the profile materialise it as a **hard-link farm** — every installed file shares an inode with the file in your checkout. That looks like it stays in sync, and for files you never rewrite it does; but a build does not edit `lib/client.js` in place, it renames a new file over the old one, which allocates a new inode and **breaks the link**. From that moment the installed copy keeps serving the previous build, with no error and no version mismatch — the only symptom is that your change is simply not there. So after every build, before restarting DSH:
+**Syncing a local install (read this before testing your change).** Installing this plugin from a checkout with a `file:` spec makes the profile materialise it as a **hard-link farm** — every installed file shares an inode with the file in your checkout. That looks like it stays in sync, and for most files it genuinely does: `lib/index.js`, `package.json` and `cordis.patch.yml` come out with `nlink 2` and a write to either side is visible from the other immediately.
+
+**`lib/client.js` is the exception, and it is the one that matters.** Check the link state and you will see it sitting at `nlink 1` with a different inode from your checkout — the build does not edit it in place, it renames a new file over the old one, which allocates a new inode and **breaks the link permanently**. From that moment the installed copy keeps serving the previous client bundle, with no error and no version mismatch; the only symptom is that your change is simply not there — a merged feature that never renders, while the tests that inspect the checkout pass. (This is not hypothetical: it is how the searchable composer seat shipped, passed every test, and was absent from the running profile.)
+
+```bash
+node -e "const f=require('fs');for(const p of ['lib/client.js','lib/index.js'])console.log(f.statSync(p).ino, p)"   # local vs installed: same inode = still linked
+```
+
+So after every build, before restarting DSH:
 
 ```bash
 node scripts/sync-installed.mjs        # defaults to $DSH_HOME/profiles/web/node_modules/dsh-omp-advisor

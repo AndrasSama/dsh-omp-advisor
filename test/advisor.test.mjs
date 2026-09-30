@@ -290,6 +290,79 @@ test('renderDelta continues from the cursor', () => {
   assert.match(delta.text, /second/)
 })
 
+/* ------------------- renderDelta: reasoning + mutating-arg windows ------------ */
+
+test('renderDelta renders assistant reasoning, ahead of the text it explains', () => {
+  const events = [
+    event('assistant/message', {
+      message: {
+        content: [
+          { type: 'reasoning', text: 'the splitter breaks on quoted fields' },
+          { type: 'text', text: 'Patching the splitter.' }
+        ]
+      }
+    })
+  ]
+  const delta = renderDelta(events, 0, 1, false)
+  assert.match(delta.text, /### Assistant reasoning\nthe splitter breaks on quoted fields/)
+  assert.match(delta.text, /### Assistant\nPatching the splitter\./)
+  assert.ok(
+    delta.text.indexOf('### Assistant reasoning') < delta.text.indexOf('### Assistant\n'),
+    'reasoning must be rendered before the final text it explains'
+  )
+})
+
+test('renderDelta tail-biases long reasoning so the conclusion survives', () => {
+  const events = [
+    event('assistant/message', {
+      message: {
+        content: [
+          { type: 'reasoning', text: `${'H'.repeat(1200)}CONCLUSION-marker` },
+          { type: 'text', text: 'done' }
+        ]
+      }
+    })
+  ]
+  const delta = renderDelta(events, 0, 1, false)
+  assert.match(delta.text, /CONCLUSION-marker/)
+  assert.match(delta.text, /chars elided/, 'a long chain must be elided from the head, not the tail')
+})
+
+test('renderDelta omits the reasoning section for a text-only message', () => {
+  const events = [event('assistant/message', { message: { content: [{ type: 'text', text: 'plain' }] } })]
+  const delta = renderDelta(events, 0, 1, false)
+  assert.doesNotMatch(delta.text, /Assistant reasoning/)
+  assert.match(delta.text, /### Assistant\nplain/)
+})
+
+test('renderDelta widens arguments for a mutating tool call', () => {
+  const body = 'x'.repeat(1500)
+  const events = [
+    event('tool/call', { callId: 'w1', name: 'write', arguments: JSON.stringify({ path: 'a.ts', content: body }) })
+  ]
+  const delta = renderDelta(events, 0, 1, false)
+  assert.doesNotMatch(delta.text, /truncated/, 'a 1500-char mutation must fit the wide window')
+  assert.ok(delta.text.includes(body), 'the whole mutation body must reach the advisor')
+})
+
+test('renderDelta keeps the narrow bound for a read-only tool call', () => {
+  const filler = 'y'.repeat(1500)
+  const events = [
+    event('tool/call', { callId: 'r1', name: 'read', arguments: JSON.stringify({ path: 'a.ts', offset: filler }) })
+  ]
+  const delta = renderDelta(events, 0, 1, false)
+  assert.match(delta.text, /truncated 1[0-9]+ chars/)
+})
+
+test('renderDelta widens a content-bearing call even under an unknown tool name', () => {
+  const body = 'z'.repeat(1500)
+  const events = [
+    event('tool/call', { callId: 'u1', name: 'custom_writer', arguments: JSON.stringify({ command: body }) })
+  ]
+  const delta = renderDelta(events, 0, 1, false)
+  assert.ok(delta.text.includes(body), 'a high-risk argument key must widen the window regardless of tool name')
+})
+
 /* ------------------------------ settings normalize --------------------------- */
 
 test('normalizeSettings clamps, dedupes, and filters entries', () => {
@@ -1499,7 +1572,26 @@ test('intervention stays off unless opted in, and only fires while the primary r
   runtimeIdle.dispose()
 })
 
-test('minDeltaChars skips tiny deltas without calling the model', async () => {
+const oneAssistantEvent = [
+  { type: 'assistant/message', data: { message: { content: [{ type: 'text', text: 'ok' }] } } }
+]
+
+test('minDeltaChars defers a tiny delta without calling the model', async () => {
+  const agent = stubAgent()
+  const llm = scriptedLlm([[{ type: 'text', text: 'ok' }]])
+  const runtime = runtimeWithEvents({
+    llm,
+    agent,
+    events: oneAssistantEvent, // small, and carries no user message
+    settings: { ...retryBaseSettings, minDeltaChars: 5000 }
+  })
+  runtime.enqueueReview(false)
+  await new Promise(resolve => setTimeout(resolve, 60))
+  assert.equal(llm.calls.length, 0)
+  runtime.dispose()
+})
+
+test('minDeltaChars never defers a delta carrying a user message', async () => {
   const agent = stubAgent()
   const llm = scriptedLlm([[{ type: 'text', text: 'ok' }]])
   const runtime = runtimeWithEvents({
@@ -1509,8 +1601,57 @@ test('minDeltaChars skips tiny deltas without calling the model', async () => {
     settings: { ...retryBaseSettings, minDeltaChars: 5000 }
   })
   runtime.enqueueReview(false)
+  await new Promise(resolve => setTimeout(resolve, 80))
+  assert.equal(
+    llm.calls.length,
+    1,
+    'a mid-session user correction must reach the advisor even when it is below the threshold'
+  )
+  runtime.dispose()
+})
+
+test('a deferred tiny delta is folded into the next review rather than dropped', async () => {
+  const agent = stubAgent()
+  const llm = scriptedLlm([[{ type: 'text', text: 'ok' }], [{ type: 'text', text: 'ok' }]])
+  const events = [
+    { type: 'assistant/message', data: { message: { content: [{ type: 'text', text: 'first-small-step' }] } } }
+  ]
+  const runtime = runtimeWithEvents({
+    llm,
+    agent,
+    events,
+    settings: { ...retryBaseSettings, minDeltaChars: 5000 }
+  })
+  runtime.enqueueReview(false)
   await new Promise(resolve => setTimeout(resolve, 60))
-  assert.equal(llm.calls.length, 0)
+  assert.equal(llm.calls.length, 0, 'the tiny non-user delta is withheld')
+
+  events.push({ type: 'user/message', data: { content: [{ type: 'text', text: 'actually do it differently' }] } })
+  runtime.enqueueReview(false)
+  await new Promise(resolve => setTimeout(resolve, 80))
+  assert.equal(llm.calls.length, 1)
+  const sent = JSON.stringify(llm.calls[0])
+  assert.match(sent, /first-small-step/, 'the withheld content must not be lost')
+  assert.match(sent, /actually do it differently/)
+  runtime.dispose()
+})
+
+test('deferral is bounded: sub-threshold deltas cannot be withheld forever', async () => {
+  const agent = stubAgent()
+  const llm = scriptedLlm([[{ type: 'text', text: 'ok' }]])
+  const events = []
+  const runtime = runtimeWithEvents({
+    llm,
+    agent,
+    events,
+    settings: { ...retryBaseSettings, minDeltaChars: 5000 }
+  })
+  for (let i = 0; i < 4; i++) {
+    events.push({ type: 'assistant/message', data: { message: { content: [{ type: 'text', text: `step-${i}` }] } } })
+    runtime.enqueueReview(false)
+    await new Promise(resolve => setTimeout(resolve, 45))
+  }
+  assert.equal(llm.calls.length, 1, 'a review is forced once the deferral limit is reached')
   runtime.dispose()
 })
 

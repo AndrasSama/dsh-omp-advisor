@@ -32,6 +32,13 @@ const QUOTA_COOLDOWN_MS = 5 * 60_000
 const RECENT_NOTES_LIMIT = 20
 
 const QUOTA_CODES = new Set(['RATE_LIMIT', 'QUOTA', 'QUOTA_EXHAUSTED', 'RATE_LIMITED', 'TOO_MANY_REQUESTS'])
+/**
+ * How many sub-threshold deltas may be withheld before a review is forced.
+ * Bounds how far coverage can lag when a workload produces only small deltas —
+ * without it, a long run of tiny edits would be deferred forever and reviewed
+ * never, which is the failure the threshold was meant to avoid.
+ */
+const DEFERRED_SKIP_LIMIT = 3
 
 function isQuotaFailure(error: unknown): boolean {
   const message = String(error instanceof Error ? error.message : error)
@@ -75,6 +82,14 @@ interface AdvisorSlot {
   quotaUntil?: number
   draining: boolean
   queued: ReviewQueueItem[]
+  /**
+   * Rendered deltas withheld by `minDeltaChars`, held to be prepended to the
+   * next review rather than discarded. The cursor has already advanced past
+   * them, so this buffer is the only copy.
+   */
+  deferredText?: string
+  /** Consecutive deferrals; bounds how long review coverage can lag. */
+  deferredSkips: number
 }
 
 /** One queued review pass. Retries carry the pre-rendered delta text. */
@@ -231,7 +246,8 @@ export class SessionAdvisorRuntime {
         adviceDelivered: 0,
         consecutiveFailures: 0,
         draining: false,
-        queued: []
+        queued: [],
+        deferredSkips: 0
       })
     }
     this.slots = next
@@ -294,16 +310,32 @@ export class SessionAdvisorRuntime {
           if (!text.trim()) {
             continue // nothing renderable happened since the last review
           }
-          if (this.minDeltaChars > 0 && text.trim().length < this.minDeltaChars) {
-            // Trivial delta: skip it. The cursor already advanced, so the
-            // skipped content is not replayed — later deltas start fresh.
-            this.host.log?.('advisor review skipped (delta below minDeltaChars)', {
+          // A user message is the highest-value content in any delta — a mid-session
+          // correction is often the whole point of the turn — and it is also the only
+          // content the skip logic can destroy outright. Never defer it.
+          const hasUserMessage = /^### User$/m.test(text)
+          const belowThreshold = this.minDeltaChars > 0 && text.trim().length < this.minDeltaChars
+          if (belowThreshold && !hasUserMessage && slot.deferredSkips < DEFERRED_SKIP_LIMIT) {
+            // Defer, do not drop. The cursor has already advanced, so the rendered
+            // text is buffered here and prepended to the next review; dropping it
+            // instead let a stream of small edits pass at zero aggregate coverage.
+            slot.deferredText = slot.deferredText ? `${slot.deferredText}\n\n${text}` : text
+            slot.deferredSkips++
+            this.host.log?.('advisor review deferred (delta below minDeltaChars)', {
               session: this.host.sessionId,
               advisor: slot.entry.name,
               chars: text.trim().length,
-              min: this.minDeltaChars
+              min: this.minDeltaChars,
+              deferred: slot.deferredSkips
             })
             continue
+          }
+          // Reviewing now: fold in anything withheld so no stretch is reviewed twice
+          // nor skipped entirely.
+          if (slot.deferredText) {
+            text = `${slot.deferredText}\n\n${text}`
+            slot.deferredText = undefined
+            slot.deferredSkips = 0
           }
         }
 

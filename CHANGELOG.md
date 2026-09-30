@@ -6,6 +6,58 @@ v0.9.0; earlier releases are described in the git log and the README.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.2] — 2026-09-30
+
+Fixes the **input side** of the advisor loop: what the reviewer is actually shown.
+All three defects were found by auditing the renderer against the prompts that describe
+it, and they share one shape — the prompt promised the advisor something the transcript
+renderer never delivered, so the advisor reasoned about a world it could not see.
+
+### Fixed
+
+- **Reasoning blocks were dropped, while the prompt promised them.** `system.md` tells
+  the advisor to challenge "skipped reasoning" and states it receives the transcript
+  "including thoughts", but `blocksToText` extracted only `type: 'text'` blocks. DSH
+  *does* persist `{ type: 'reasoning' }` blocks in `assistant/message` events — verified
+  against real session logs, where they are a substantial share of assistant content — so
+  every advisor was systematically mistaking *unrendered* reasoning for *absent* reasoning
+  and could raise exactly the "skipped reasoning" challenge the prompt forbids, against an
+  agent that had reasoned.
+  Reasoning now renders as its own `### Assistant reasoning` section, ahead of the final
+  text it explains, **tail-biased**: the head of an over-long chain is elided and the
+  conclusion is always kept, because the conclusion carries the judgement. `system.md` now
+  states this, and that reasoning absent from an update was genuinely not recorded.
+
+- **Mutating tool arguments were truncated at 400 characters.** One uniform
+  `ARGS_PREVIEW_LIMIT` applied the same narrow window to a `read` and to a `write`, so the
+  advisor was shown the *shape* of a mutation and none of its content — while the same
+  prompt forbade asserting anything about unrendered arguments. On the highest-risk events
+  the advisor had to either stay silent or burn most of its per-update budget re-reading
+  what the delta had already been given. Calls whose arguments *are* the change (`write`,
+  `edit`, `patch`, `bash`, and any call carrying a content-bearing key such as
+  `content`/`command`/`new_string`) now get a 2000-char window; reads keep the narrow bound.
+  `system.md` now tells the advisor that every cut is explicitly marked, and that text with
+  no marker beyond it is citable evidence.
+
+- **`minDeltaChars` destroyed content instead of deferring it.** A delta below the threshold
+  was logged, dropped, and — because the cursor had already advanced — unrecoverable. A user
+  message is frequently *smaller* than the threshold, so a mid-session correction could be
+  silently swallowed while the turn it corrected was reviewed. Sub-threshold deltas are now
+  **buffered and folded into the next review**; a delta carrying a user message is **never**
+  deferred; and deferral is bounded (`DEFERRED_SKIP_LIMIT`, 3) so a long run of small deltas
+  cannot suppress review coverage indefinitely.
+
+### Notes
+
+- Behaviour change: a sub-threshold delta containing a user message is now reviewed
+  immediately. The previous test asserted the old behaviour and was rewritten to encode the
+  new contract.
+- Every fix is covered by tests verified to *fail* when the fix is reverted (163 tests
+  total): removing reasoning rendering fails exactly the two reasoning tests, removing the
+  widening fails exactly the two mutating-argument tests, and each of the three deferral
+  properties has its own failing mutation — permitting deferral of a user message, dropping
+  the buffer, and removing the deferral bound.
+
 ## [0.9.1] — 2026-09-30
 
 ### Added
